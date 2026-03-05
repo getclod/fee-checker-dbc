@@ -1,12 +1,9 @@
-// telegram.js — Beautiful Telegram formatter with emoji indicators
+// telegram.js — Clean Telegram formatter
 
 const MAX_MSG_LEN = 4000;
 
 function esc(str) {
-    return String(str || '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+    return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function shortAddr(addr, front = 6, back = 4) {
@@ -14,12 +11,9 @@ function shortAddr(addr, front = 6, back = 4) {
     return `${addr.slice(0, front)}...${addr.slice(-back)}`;
 }
 
-function fmtSol(n) {
-    if (!n || !Number.isFinite(Number(n))) return '0';
-    const v = Number(n);
-    if (v >= 1000) return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    if (v >= 1) return v.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
-    return v.toLocaleString('en-US', { minimumFractionDigits: 6, maximumFractionDigits: 6 });
+function fmtSol(n, label) {
+    if (!n || !Number.isFinite(Number(n))) return `0.000000 ${label || 'SOL'}`;
+    return Number(n).toFixed(6) + ` ${label || 'SOL'}`;
 }
 
 function fmtUsd(n) {
@@ -27,11 +21,8 @@ function fmtUsd(n) {
     return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function solscanToken(mint) { return `https://solscan.io/token/${mint}`; }
 function solscanAccount(addr) { return `https://solscan.io/account/${addr}`; }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// START
 // ──────────────────────────────────────────────────────────────────────────────
 
 function formatStartMessage() {
@@ -60,80 +51,55 @@ function formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd, configData) {
     const name = (tokenMeta && tokenMeta.name) ? esc(tokenMeta.name) : 'Unknown';
     const symbol = (tokenMeta && tokenMeta.symbol) ? esc(tokenMeta.symbol) : '?';
     const price = (label === 'SOL') ? (solUsd || 0) : (feeData.quotePrice || 0);
-    const mint = poolInfo ? poolInfo.baseMint : '';
 
     const lines = [];
 
-    // Token header
-    lines.push(`🪙 <b>${name}</b> - $${symbol}`);
-    if (mint) lines.push(`<code>${mint}</code>`);
+    lines.push(`✅ <b>Fee Check Results</b>`);
+    lines.push(``);
+    lines.push(`Token:`);
+    lines.push(`${name} (${symbol})`);
     lines.push(``);
 
-    // Error
     if (feeData.error) {
         lines.push(`❌ ${esc(feeData.error)}`);
         return lines.join('\n');
     }
 
-    // No fees
-    if (!feeData.readyToClaim) {
-        lines.push(`📭 No claimable fees`);
-        lines.push(``);
-        addInfo(lines, poolInfo, configData);
-        return lines.join('\n');
-    }
-
-    // Fee breakdown
-    const totalQ = feeData.quoteAmount || 0;
+    // Always show both, even if 0
     const creatorQ = feeData.creatorQuoteAmount ?? 0;
     const partnerQ = feeData.partnerQuoteAmount ?? 0;
+    const totalQ = feeData.quoteAmount || (creatorQ + partnerQ);
 
-    lines.push(`💰 <b>Claimable Fees</b>`);
-
-    if (creatorQ > 0) {
-        lines.push(`  👤 Creator  <code>${fmtSol(creatorQ)} ${label}</code>  ~${fmtUsd(creatorQ * price)}`);
-    }
-    if (partnerQ > 0) {
-        lines.push(`  🤝 Partner  <code>${fmtSol(partnerQ)} ${label}</code>  ~${fmtUsd(partnerQ * price)}`);
-    }
-    if (creatorQ > 0 && partnerQ > 0) {
-        lines.push(`  ─────────────────────`);
-        lines.push(`  📊 Total    <code>${fmtSol(totalQ)} ${label}</code>  ~${fmtUsd(totalQ * price)}`);
-    }
-    if (creatorQ === 0 && partnerQ === 0 && totalQ > 0) {
-        lines.push(`  📊 Total  <code>${fmtSol(totalQ)} ${label}</code>  ~${fmtUsd(totalQ * price)}`);
-    }
-
-    lines.push(``);
-    if (price > 0) lines.push(`💲 1 ${label} = ${fmtUsd(price)}`);
+    lines.push(`💰 Platform Fee (Available):`);
+    lines.push(`${fmtSol(partnerQ, label)} (~${fmtUsd(partnerQ * price)})`);
     lines.push(``);
 
-    // Fee split from config
-    if (configData && configData.tradingFeeSplit) {
-        const ts = configData.tradingFeeSplit;
-        lines.push(`📊 Fee Split: Creator <code>${ts.creator}%</code> · Partner <code>${ts.partner}%</code>`);
+    lines.push(`💰 Creator Fee (Available):`);
+    lines.push(`${fmtSol(creatorQ, label)} (~${fmtUsd(creatorQ * price)})`);
+    lines.push(``);
+
+    lines.push(`📊 <b>Total Available Fees:</b>`);
+    lines.push(`${fmtSol(totalQ, label)} (~${fmtUsd(totalQ * price)})`);
+    lines.push(``);
+
+    if (price > 0) {
+        lines.push(`💲 1 ${label} = ${fmtUsd(price)}`);
         lines.push(``);
     }
 
-    addInfo(lines, poolInfo, configData);
-    return lines.join('\n');
-}
-
-function addInfo(lines, poolInfo, configData) {
-    if (!poolInfo) return;
-
-    lines.push(`🏊 Pool: <a href="${solscanAccount(poolInfo.address)}">${shortAddr(poolInfo.address)}</a>`);
-    lines.push(`⚙️ Config: <a href="${solscanAccount(poolInfo.config)}">${shortAddr(poolInfo.config)}</a>`);
-
-    // Pool deployer (creator)
-    if (poolInfo.creator && poolInfo.creator !== 'Unknown') {
-        lines.push(`👑 Deployer: <a href="${solscanAccount(poolInfo.creator)}">${shortAddr(poolInfo.creator)}</a>`);
+    // Info section
+    if (poolInfo) {
+        if (poolInfo.creator && poolInfo.creator !== 'Unknown') {
+            lines.push(`👑 Deployer: <a href="${solscanAccount(poolInfo.creator)}">${shortAddr(poolInfo.creator)}</a>`);
+        }
+        lines.push(`⚙️ Config: <a href="${solscanAccount(poolInfo.config)}">${shortAddr(poolInfo.config)}</a>`);
     }
 
-    // Config fee claimer (config creator)
     if (configData && configData.feeClaimer && configData.feeClaimer !== 'N/A') {
         lines.push(`🔑 Config Creator: <a href="${solscanAccount(configData.feeClaimer)}">${shortAddr(configData.feeClaimer)}</a>`);
     }
+
+    return lines.join('\n');
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -144,16 +110,14 @@ function formatConfigMessage(data, configAddress, poolInfo) {
     const lines = [];
     const cfgAddr = configAddress || (poolInfo && poolInfo.config) || '';
 
-    lines.push(`⚙️ <b>Config Checker</b>`);
-    if (poolInfo && poolInfo.baseMint) lines.push(`<code>${poolInfo.baseMint}</code>`);
+    lines.push(`✅ <b>Config Check Results</b>`);
     lines.push(``);
 
     // Addresses
-    if (poolInfo) lines.push(`🏊 Pool: <a href="${solscanAccount(poolInfo.address)}">${shortAddr(poolInfo.address)}</a>`);
-    lines.push(`⚙️ Config: <a href="${solscanAccount(cfgAddr)}">${shortAddr(cfgAddr)}</a>`);
     if (poolInfo && poolInfo.creator && poolInfo.creator !== 'Unknown') {
         lines.push(`👑 Deployer: <a href="${solscanAccount(poolInfo.creator)}">${shortAddr(poolInfo.creator)}</a>`);
     }
+    lines.push(`⚙️ Config: <a href="${solscanAccount(cfgAddr)}">${shortAddr(cfgAddr)}</a>`);
     if (data.feeClaimer && data.feeClaimer !== 'N/A') {
         lines.push(`🔑 Config Creator: <a href="${solscanAccount(data.feeClaimer)}">${shortAddr(data.feeClaimer)}</a>`);
     }
@@ -179,7 +143,7 @@ function formatConfigMessage(data, configAddress, poolInfo) {
         lines.push(``);
     }
 
-    // Fee split + LP
+    // Fee split
     if (data.tradingFeeSplit) {
         const ts = data.tradingFeeSplit;
         lines.push(`📊 <b>Fee Split</b>`);
@@ -187,6 +151,7 @@ function formatConfigMessage(data, configAddress, poolInfo) {
         lines.push(``);
     }
 
+    // LP
     if (data.lpDistribution) {
         const lp = data.lpDistribution;
         lines.push(`💧 <b>LP Distribution</b>`);
@@ -218,9 +183,7 @@ function formatConfigMessage(data, configAddress, poolInfo) {
         lines.push(``);
     }
 
-    // Quote + collect
-    lines.push(`🔑 <b>Config Details</b>`);
-    lines.push(`   Quote: <code>${shortAddr(esc(data.quoteMint), 6, 4)}</code>`);
+    lines.push(`🔑 Quote: <code>${shortAddr(esc(data.quoteMint), 6, 4)}</code>`);
     lines.push(`   Collect: <code>${esc(data.collectFeeMode)}</code>`);
 
     const result = lines.join('\n');
@@ -235,17 +198,8 @@ function fmtMc(value) {
     return `${value.toFixed(2)}`;
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// ERROR
-// ──────────────────────────────────────────────────────────────────────────────
-
 function formatError(title, message) {
     return `❌ <b>${esc(title)}</b>\n\n${esc(message)}`;
 }
 
-module.exports = {
-    formatConfigMessage,
-    formatFeeMessage,
-    formatError,
-    formatStartMessage,
-};
+module.exports = { formatConfigMessage, formatFeeMessage, formatError, formatStartMessage };
