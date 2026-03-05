@@ -1,7 +1,6 @@
 // telegram.js — Elegant monospace formatter for Telegram HTML messages
-// Clean, minimalist, no emoji — uses box-drawing and aligned columns
 
-const MAX_MSG_LEN = 4000; // Telegram max is 4096, leave margin
+const MAX_MSG_LEN = 4000;
 
 function esc(str) {
     return String(str || '')
@@ -10,303 +9,291 @@ function esc(str) {
         .replace(/>/g, '&gt;');
 }
 
-function line(label, value) {
-    const l = String(label).padEnd(22);
-    return `  ${l} ${esc(String(value))}`;
-}
-
-function divider(char = '-', width = 44) {
-    return char.repeat(width);
-}
-
-function header(title) {
-    const bar = '='.repeat(44);
-    return `${bar}\n  ${title}\n${bar}`;
-}
-
-function shortAddr(addr) {
+function shortAddr(addr, front = 4, back = 4) {
     if (!addr || addr === 'N/A' || addr.length < 12) return addr || 'N/A';
-    return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+    return `${addr.slice(0, front)}...${addr.slice(-back)}`;
+}
+
+function fmtNum(n, decimals = 4) {
+    if (n === null || n === undefined) return '0';
+    const v = Number(n);
+    if (!Number.isFinite(v)) return '0';
+    if (Math.abs(v) < 0.0001) return '0';
+    return v.toLocaleString('en-US', { maximumFractionDigits: decimals, minimumFractionDigits: 2 });
+}
+
+function fmtUsd(n) {
+    if (n === null || n === undefined || Number(n) === 0) return '$0.00';
+    const v = Number(n);
+    if (!Number.isFinite(v)) return '$0.00';
+    return '$' + v.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// CONFIG formatter
+// START / HELP
+// ──────────────────────────────────────────────────────────────────────────────
+
+function formatStartMessage() {
+    const lines = [
+        ``,
+        `  DBC CHECKER BOT`,
+        `  ───────────────────────────`,
+        `  Meteora Dynamic Bonding Curve`,
+        `  On-chain checker for Solana`,
+        ``,
+        ``,
+        `  COMMANDS`,
+        `  ───────────────────────────`,
+        ``,
+        `  /checkerfee   &lt;mint&gt;`,
+        `  Check claimable trading fees`,
+        ``,
+        `  /checkerconfig &lt;mint&gt;`,
+        `  Read pool configuration`,
+        ``,
+        ``,
+        `  Paste any token CA/mint address`,
+        `  after the command to begin.`,
+        ``,
+    ];
+    return `<pre>${lines.join('\n')}</pre>`;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// FEE CHECKER
+// ──────────────────────────────────────────────────────────────────────────────
+
+function formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd) {
+    const label = feeData.quoteLabel || 'SOL';
+    const tokenName = (tokenMeta && tokenMeta.name) ? tokenMeta.name : 'Unknown';
+    const tokenSymbol = (tokenMeta && tokenMeta.symbol) ? tokenMeta.symbol : '?';
+
+    const lines = [];
+
+    // Header
+    lines.push(``);
+    lines.push(`  FEE CHECKER`);
+    lines.push(`  ───────────────────────────`);
+
+    // Token identity
+    lines.push(`  ${esc(tokenName)} (${esc(tokenSymbol)})`);
+    lines.push(``);
+
+    if (feeData.error) {
+        lines.push(`  Status    Error`);
+        lines.push(`  Detail    ${esc(feeData.error)}`);
+        lines.push(``);
+        addPoolLinks(lines, poolInfo);
+        return wrap(lines);
+    }
+
+    if (!feeData.readyToClaim) {
+        lines.push(`  Status    No fees to claim`);
+        lines.push(``);
+        addPoolLinks(lines, poolInfo);
+        return wrap(lines);
+    }
+
+    // Fee amounts
+    const totalQ = feeData.quoteAmount || 0;
+    const creatorQ = feeData.creatorQuoteAmount ?? 0;
+    const partnerQ = feeData.partnerQuoteAmount ?? 0;
+    const price = (label === 'SOL') ? (solUsd || 0) : (feeData.quotePrice || 0);
+
+    lines.push(`  CLAIMABLE FEES`);
+    lines.push(`  ───────────────────────────`);
+    lines.push(``);
+
+    if (creatorQ > 0 && partnerQ > 0) {
+        lines.push(`  Creator   ${fmtNum(creatorQ)} ${label}`);
+        lines.push(`            ${fmtUsd(creatorQ * price)}`);
+        lines.push(``);
+        lines.push(`  Partner   ${fmtNum(partnerQ)} ${label}`);
+        lines.push(`            ${fmtUsd(partnerQ * price)}`);
+        lines.push(``);
+        lines.push(`  ───────────────────────────`);
+        lines.push(`  Total     ${fmtNum(totalQ)} ${label}`);
+        lines.push(`            ${fmtUsd(totalQ * price)}`);
+    } else if (creatorQ > 0) {
+        lines.push(`  Creator   ${fmtNum(creatorQ)} ${label}`);
+        lines.push(`            ${fmtUsd(creatorQ * price)}`);
+    } else if (partnerQ > 0) {
+        lines.push(`  Partner   ${fmtNum(partnerQ)} ${label}`);
+        lines.push(`            ${fmtUsd(partnerQ * price)}`);
+    } else {
+        lines.push(`  Total     ${fmtNum(totalQ)} ${label}`);
+        lines.push(`            ${fmtUsd(totalQ * price)}`);
+    }
+
+    lines.push(``);
+
+    // Price reference
+    if (price > 0) {
+        lines.push(`  ${label} Price  ${fmtUsd(price)}`);
+        lines.push(``);
+    }
+
+    // Pool links
+    addPoolLinks(lines, poolInfo);
+
+    return wrap(lines);
+}
+
+function addPoolLinks(lines, poolInfo) {
+    if (!poolInfo) return;
+    lines.push(`  POOL INFO`);
+    lines.push(`  ───────────────────────────`);
+    lines.push(`  Pool    ${esc(poolInfo.address)}`);
+    lines.push(`  Mint    ${esc(poolInfo.baseMint)}`);
+    lines.push(`  Config  ${esc(poolInfo.config)}`);
+    lines.push(``);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CONFIG CHECKER
 // ──────────────────────────────────────────────────────────────────────────────
 
 function formatConfigMessage(data, configAddress, poolInfo) {
     const lines = [];
 
-    lines.push(header('DBC CONFIG CHECKER'));
-    lines.push('');
+    // Header
+    lines.push(``);
+    lines.push(`  CONFIG CHECKER`);
+    lines.push(`  ───────────────────────────`);
 
     if (poolInfo) {
-        lines.push(`  Pool       ${esc(poolInfo.address)}`);
-        lines.push(`  Config     ${esc(configAddress || poolInfo.config)}`);
-        lines.push(`  Base Mint  ${esc(poolInfo.baseMint)}`);
-        lines.push('');
-        lines.push(divider());
+        lines.push(`  Pool    ${esc(poolInfo.address)}`);
+        lines.push(`  Mint    ${esc(poolInfo.baseMint)}`);
+        lines.push(`  Config  ${esc(configAddress || poolInfo.config)}`);
     }
+    lines.push(``);
 
-    // Core Settings
-    lines.push('');
-    lines.push(`  [ CORE SETTINGS ]`);
-    lines.push('');
-    lines.push(line('Quote Mint', data.quoteMint));
-    lines.push(line('Fee Claimer', shortAddr(data.feeClaimer)));
-    lines.push(line('Leftover Receiver', shortAddr(data.leftoverReceiver)));
-    lines.push(line('Pool Creation Fee', `${data.poolCreationFee} SOL`));
-    lines.push(line('Collect Fee Mode', data.collectFeeMode));
-    lines.push(line('Token Type', data.tokenType));
-    lines.push(line('Token Decimals', data.tokenDecimal));
-    lines.push(line('Activation Type', data.activationType));
+    // Token info
+    lines.push(`  TOKEN`);
+    lines.push(`  ───────────────────────────`);
+    lines.push(`  Type       ${esc(data.tokenType)}`);
+    lines.push(`  Decimals   ${data.tokenDecimal}`);
+    lines.push(`  Activation ${esc(data.activationType)}`);
+    lines.push(``);
 
-    // LP Distribution
-    if (data.lpDistribution) {
-        lines.push('');
-        lines.push(divider());
-        lines.push('');
-        lines.push(`  [ LP DISTRIBUTION ]`);
-        lines.push('');
-        lines.push(line('Partner LP', `${data.lpDistribution.partnerLp}%`));
-        lines.push(line('Creator LP', `${data.lpDistribution.creatorLp}%`));
-        lines.push(line('Partner Locked LP', `${data.lpDistribution.partnerLocked}%`));
-        lines.push(line('Creator Locked LP', `${data.lpDistribution.creatorLocked}%`));
-    }
-
-    // Trading Fee Split
-    if (data.tradingFeeSplit) {
-        lines.push('');
-        lines.push(divider());
-        lines.push('');
-        lines.push(`  [ TRADING FEE SPLIT ]`);
-        lines.push('');
-        lines.push(line('Partner (Platform)', `${data.tradingFeeSplit.partner}%`));
-        lines.push(line('Creator', `${data.tradingFeeSplit.creator}%`));
-    }
-
-    // Base Fee / Anti-Sniper
+    // Fee schedule
     if (data.baseFee) {
         const bf = data.baseFee;
-        lines.push('');
-        lines.push(divider());
-        lines.push('');
-        lines.push(`  [ BASE FEE / ANTI-SNIPER ]`);
-        lines.push('');
-        lines.push(line('Scheduler Mode', bf.mode));
-        lines.push(line('Start Fee', `${bf.startFee} (${bf.startFeeBps} bps)`));
-        lines.push(line('End Fee', `${bf.endFee} (${bf.endFeeBps} bps)`));
-        lines.push(line('Duration', bf.duration));
-        lines.push(line('Periods', bf.numberOfPeriods));
-        lines.push(line('Period Frequency', bf.periodFrequency));
-
+        lines.push(`  FEE SCHEDULE`);
+        lines.push(`  ───────────────────────────`);
+        lines.push(`  Mode       ${esc(bf.mode)}`);
+        lines.push(`  Start      ${esc(bf.startFee)}`);
+        lines.push(`  End        ${esc(bf.endFee)}`);
+        lines.push(`  Duration   ${esc(bf.duration)}`);
+        lines.push(`  Periods    ${bf.numberOfPeriods}`);
+        lines.push(`  Frequency  ${bf.periodFrequency}`);
         if (bf.reductionFactor !== null && bf.reductionFactor !== undefined) {
             const r = 1 - (bf.reductionFactor / 10_000);
-            lines.push(line('Reduction Factor', `${bf.reductionFactor} bps (x${r.toFixed(4)})`));
+            lines.push(`  Reduction  ${bf.reductionFactor} bps (x${r.toFixed(4)})`);
         }
-
-        if (bf.rateLimiter) {
-            lines.push('');
-            lines.push(`  [ RATE LIMITER ]`);
-            lines.push(line('Base Fee', `${bf.rateLimiter.baseFeeBps} bps`));
-            lines.push(line('Fee Increment', `${bf.rateLimiter.feeIncrementBps} bps`));
-            lines.push(line('Reference Amount', bf.rateLimiter.referenceAmount));
-            lines.push(line('Max Duration', bf.rateLimiter.maxLimiterDuration));
-        }
+        lines.push(``);
     }
 
-    // Dynamic Fee
+    // LP distribution
+    if (data.lpDistribution) {
+        const lp = data.lpDistribution;
+        lines.push(`  LP DISTRIBUTION`);
+        lines.push(`  ───────────────────────────`);
+        lines.push(`  Creator LP       ${lp.creatorLp}%`);
+        lines.push(`  Creator Locked   ${lp.creatorLocked}%`);
+        lines.push(`  Partner LP       ${lp.partnerLp}%`);
+        lines.push(`  Partner Locked   ${lp.partnerLocked}%`);
+        lines.push(``);
+    }
+
+    // Trading fee split
+    if (data.tradingFeeSplit) {
+        lines.push(`  TRADING FEE SPLIT`);
+        lines.push(`  ───────────────────────────`);
+        lines.push(`  Creator    ${data.tradingFeeSplit.creator}%`);
+        lines.push(`  Partner    ${data.tradingFeeSplit.partner}%`);
+        lines.push(``);
+    }
+
+    // Dynamic fee
     if (data.dynamicFee) {
         const df = data.dynamicFee;
-        lines.push('');
-        lines.push(divider());
-        lines.push('');
-        lines.push(`  [ DYNAMIC FEE ]`);
-        lines.push('');
-        lines.push(line('Status', df.status));
+        lines.push(`  DYNAMIC FEE`);
+        lines.push(`  ───────────────────────────`);
+        lines.push(`  Status     ${df.status}`);
         if (df.status === 'ON') {
-            lines.push(line('Bin Step', df.binStep));
-            lines.push(line('Filter Period', df.filterPeriod));
-            lines.push(line('Decay Period', df.decayPeriod));
-            lines.push(line('Reduction Factor', df.reductionFactor));
-            lines.push(line('Max Vol Accumulator', df.maxVolatilityAccumulator));
-            lines.push(line('Variable Fee Ctrl', df.variableFeeControl));
+            lines.push(`  Bin Step   ${df.binStep}`);
+            lines.push(`  Filter     ${df.filterPeriod}`);
+            lines.push(`  Decay      ${df.decayPeriod}`);
+            lines.push(`  Reduction  ${df.reductionFactor}`);
+            lines.push(`  Max Vol    ${df.maxVolatilityAccumulator}`);
+            lines.push(`  Var Ctrl   ${df.variableFeeControl}`);
         }
+        lines.push(``);
     }
 
     // Migration
     if (data.migrationDetails) {
         const m = data.migrationDetails;
-        lines.push('');
-        lines.push(divider());
-        lines.push('');
-        lines.push(`  [ MIGRATION ]`);
-        lines.push('');
-        lines.push(line('Option', m.option));
-        if (m.quoteThresholdSol) lines.push(line('Quote Threshold', `${m.quoteThresholdSol} SOL`));
-        if (m.startMcQuote !== null) lines.push(line('Start MC', fmtQuote(m.startMcQuote, data.quoteMint)));
-        if (m.endMcQuote !== null) lines.push(line('End MC (Migration)', fmtQuote(m.endMcQuote, data.quoteMint)));
-    }
-
-    // Migration Fees
-    if (data.migrationFees) {
-        const mf = data.migrationFees;
-        lines.push('');
-        lines.push(divider());
-        lines.push('');
-        lines.push(`  [ MIGRATION FEES ]`);
-        lines.push('');
-        lines.push(line('Fee Option', mf.optionLabel));
-        lines.push(line('Migration Fee %', `${mf.migrationFeePercentage}%`));
-        lines.push(line('Creator Migration %', `${mf.creatorMigrationFeePercentage}%`));
-    }
-
-    lines.push('');
-    lines.push(divider('='));
-
-    const body = lines.join('\n');
-    if (body.length > MAX_MSG_LEN) {
-        return `<pre>${body.slice(0, MAX_MSG_LEN - 20)}\n... (truncated)</pre>`;
-    }
-    return `<pre>${body}</pre>`;
-}
-
-function fmtQuote(value, quoteMint) {
-    if (value === null || value === undefined) return 'N/A';
-    const label = (quoteMint && quoteMint.startsWith('So1111')) ? 'SOL' : 'Quote';
-    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M ${label}`;
-    if (value >= 1_000) return `${(value / 1_000).toFixed(2)}K ${label}`;
-    return `${value.toFixed(4)} ${label}`;
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// FEE formatter
-// ──────────────────────────────────────────────────────────────────────────────
-
-function formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd) {
-    const lines = [];
-
-    lines.push(header('DBC FEE CHECKER'));
-    lines.push('');
-
-    // Token info
-    if (tokenMeta && (tokenMeta.name || tokenMeta.symbol)) {
-        lines.push(`  Token      ${esc(tokenMeta.name || 'Unknown')} (${esc(tokenMeta.symbol || '?')})`);
-    }
-    if (poolInfo) {
-        lines.push(`  Pool       ${esc(poolInfo.address)}`);
-        lines.push(`  Base Mint  ${esc(poolInfo.baseMint)}`);
-        lines.push(`  Config     ${esc(poolInfo.config)}`);
-    }
-
-    lines.push('');
-    lines.push(divider());
-    lines.push('');
-    lines.push(`  [ CLAIMABLE FEES ]`);
-    lines.push('');
-
-    const label = feeData.quoteLabel || 'SOL';
-
-    if (feeData.error) {
-        lines.push(line('Status', 'Error'));
-        lines.push(line('Detail', feeData.error));
-    } else if (!feeData.readyToClaim) {
-        lines.push(line('Status', 'No claimable fees'));
-        lines.push(line(`Total (${label})`, '0'));
-    } else {
-        lines.push(line('Status', 'Fees available'));
-        lines.push('');
-
-        // Amounts
-        const totalQ = feeData.quoteAmount || 0;
-        const creatorQ = feeData.creatorQuoteAmount ?? totalQ;
-        const partnerQ = feeData.partnerQuoteAmount ?? 0;
-
-        lines.push(line(`Total (${label})`, fmtNum(totalQ)));
-        if (creatorQ > 0) lines.push(line(`  Creator`, fmtNum(creatorQ)));
-        if (partnerQ > 0) lines.push(line(`  Partner`, fmtNum(partnerQ)));
-
-        // USD values
-        lines.push('');
-        const price = feeData.quotePrice || 0;
-        if (label === 'SOL' && solUsd > 0) {
-            lines.push(line('SOL Price', `$${fmtNum(solUsd)}`));
-            lines.push(line('Total (USD)', `$${fmtNum(totalQ * solUsd)}`));
-            if (creatorQ > 0) lines.push(line('  Creator (USD)', `$${fmtNum(creatorQ * solUsd)}`));
-            if (partnerQ > 0) lines.push(line('  Partner (USD)', `$${fmtNum(partnerQ * solUsd)}`));
-        } else if (price > 0) {
-            lines.push(line(`${label} Price`, `$${fmtNum(price)}`));
-            lines.push(line('Total (USD)', `$${fmtNum(totalQ * price)}`));
+        lines.push(`  MIGRATION`);
+        lines.push(`  ───────────────────────────`);
+        lines.push(`  Option     ${esc(m.option)}`);
+        if (m.quoteThresholdSol) {
+            lines.push(`  Threshold  ${m.quoteThresholdSol} SOL`);
         }
+        if (m.startMcQuote !== null) {
+            lines.push(`  Start MC   ${fmtMc(m.startMcQuote)}`);
+        }
+        if (m.endMcQuote !== null) {
+            lines.push(`  End MC     ${fmtMc(m.endMcQuote)}`);
+        }
+        lines.push(``);
     }
 
-    lines.push('');
-    lines.push(divider('='));
+    // Addresses
+    lines.push(`  ADDRESSES`);
+    lines.push(`  ───────────────────────────`);
+    lines.push(`  Quote Mint  ${esc(data.quoteMint)}`);
+    lines.push(`  Fee Claimer ${esc(shortAddr(data.feeClaimer, 6, 6))}`);
+    lines.push(`  Collect     ${esc(data.collectFeeMode)}`);
+    lines.push(``);
 
-    const body = lines.join('\n');
-    if (body.length > MAX_MSG_LEN) {
-        return `<pre>${body.slice(0, MAX_MSG_LEN - 20)}\n... (truncated)</pre>`;
-    }
-    return `<pre>${body}</pre>`;
+    return wrap(lines);
 }
 
-function fmtNum(n) {
-    if (n === null || n === undefined) return '0';
-    const v = Number(n);
-    if (!Number.isFinite(v)) return '0';
-    if (Math.abs(v) < 0.0001) return '0';
-    if (Math.abs(v) >= 1_000_000) return v.toLocaleString('en-US', { maximumFractionDigits: 2 });
-    if (Math.abs(v) >= 1) return v.toLocaleString('en-US', { maximumFractionDigits: 4 });
-    return v.toLocaleString('en-US', { maximumFractionDigits: 8 });
+function fmtMc(value) {
+    if (value === null || value === undefined) return 'N/A';
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+    if (value >= 1_000) return `${(value / 1_000).toFixed(2)}K`;
+    return `${value.toFixed(2)}`;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// ERROR formatter
+// ERROR
 // ──────────────────────────────────────────────────────────────────────────────
 
 function formatError(title, message) {
-    const lines = [];
-    lines.push(divider('='));
-    lines.push(`  ${esc(title)}`);
-    lines.push(divider('='));
-    lines.push('');
-    lines.push(`  ${esc(message)}`);
-    lines.push('');
-    lines.push(divider('='));
+    const lines = [
+        ``,
+        `  ${esc(title)}`,
+        `  ───────────────────────────`,
+        ``,
+        `  ${esc(message)}`,
+        ``,
+    ];
     return `<pre>${lines.join('\n')}</pre>`;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// START / HELP formatter
+// Util
 // ──────────────────────────────────────────────────────────────────────────────
 
-function formatStartMessage() {
-    const lines = [];
-    lines.push(header('DBC CHECKER BOT'));
-    lines.push('');
-    lines.push('  Meteora Dynamic Bonding Curve');
-    lines.push('  On-chain fee and config checker');
-    lines.push('');
-    lines.push(divider());
-    lines.push('');
-    lines.push('  [ COMMANDS ]');
-    lines.push('');
-    lines.push('  /checkerfee <mint>');
-    lines.push('    Check claimable trading fees');
-    lines.push('    for any DBC pool by token mint.');
-    lines.push('');
-    lines.push('  /checkerconfig <mint>');
-    lines.push('    Read full pool configuration');
-    lines.push('    including fee schedule, LP split,');
-    lines.push('    migration, and dynamic fee params.');
-    lines.push('');
-    lines.push(divider());
-    lines.push('');
-    lines.push('  Usage example:');
-    lines.push('  /checkerfee So11...1112');
-    lines.push('  /checkerconfig So11...1112');
-    lines.push('');
-    lines.push(divider('='));
-    return `<pre>${lines.join('\n')}</pre>`;
+function wrap(lines) {
+    const body = lines.join('\n');
+    if (body.length > MAX_MSG_LEN) {
+        return `<pre>${body.slice(0, MAX_MSG_LEN - 20)}\n...</pre>`;
+    }
+    return `<pre>${body}</pre>`;
 }
 
 module.exports = {
