@@ -65,29 +65,29 @@ bot.onText(/\/start/, (msg) => {
     sendHtml(bot, chatId, formatStartMessage());
 });
 
-// ── /checkerconfig <mint> ────────────────────────────────────────────────────
+// ── /checkconfig <mint> ────────────────────────────────────────────────────
 
-bot.onText(/\/checkerconfig(.*)/, async (msg, match) => {
+bot.onText(/\/checkconfig(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const input = (match[1] || '').trim();
 
     if (!input) {
-        log('WARN', '/checkerconfig', chatId, 'No mint address provided');
+        log('WARN', '/checkconfig', chatId, 'No mint address provided');
         return sendHtml(bot, chatId, formatError(
             'Missing Argument',
-            'Usage: /checkerconfig <token_mint_address>',
+            'Usage: /checkconfig <token_mint_address>',
         ));
     }
 
     if (!isValidBase58(input)) {
-        log('WARN', '/checkerconfig', chatId, `Invalid address: ${input.slice(0, 12)}...`);
+        log('WARN', '/checkconfig', chatId, `Invalid address: ${input.slice(0, 12)}...`);
         return sendHtml(bot, chatId, formatError(
             'Invalid Address',
             'Please provide a valid Solana base58 address.',
         ));
     }
 
-    log('INFO', '/checkerconfig', chatId, `Checking config for mint: ${input}`);
+    log('INFO', '/checkconfig', chatId, `Checking config for mint: ${input}`);
 
     // Send "processing" indicator
     await bot.sendChatAction(chatId, 'typing');
@@ -96,11 +96,11 @@ bot.onText(/\/checkerconfig(.*)/, async (msg, match) => {
         const result = await getConfigFromMint(input);
 
         if (!result.success) {
-            log('WARN', '/checkerconfig', chatId, `Config check failed: ${result.error}`);
+            log('WARN', '/checkconfig', chatId, `Config check failed: ${result.error}`);
             return sendHtml(bot, chatId, formatError('Config Check Failed', result.error));
         }
 
-        log('INFO', '/checkerconfig', chatId, `Config read successfully`);
+        log('INFO', '/checkconfig', chatId, `Config read successfully`);
         const html = formatConfigMessage(
             result.data,
             result.configAddress || (result.poolInfo && result.poolInfo.config),
@@ -108,51 +108,51 @@ bot.onText(/\/checkerconfig(.*)/, async (msg, match) => {
         );
         return sendHtml(bot, chatId, html);
     } catch (e) {
-        log('ERROR', '/checkerconfig', chatId, `Exception: ${e.message}`);
+        log('ERROR', '/checkconfig', chatId, `Exception: ${e.message}`);
         return sendHtml(bot, chatId, formatError('Error', e.message || 'Unexpected error'));
     }
 });
 
-// ── /checkerfee <mint> ───────────────────────────────────────────────────────
+// ── /checkfee <mint> ───────────────────────────────────────────────────────
 
-bot.onText(/\/checkerfee(.*)/, async (msg, match) => {
+bot.onText(/\/checkfee(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const input = (match[1] || '').trim();
 
     if (!input) {
-        log('WARN', '/checkerfee', chatId, 'No mint address provided');
+        log('WARN', '/checkfee', chatId, 'No mint address provided');
         return sendHtml(bot, chatId, formatError(
             'Missing Argument',
-            'Usage: /checkerfee <token_mint_address>',
+            'Usage: /checkfee <token_mint_address>',
         ));
     }
 
     if (!isValidBase58(input)) {
-        log('WARN', '/checkerfee', chatId, `Invalid address: ${input.slice(0, 12)}...`);
+        log('WARN', '/checkfee', chatId, `Invalid address: ${input.slice(0, 12)}...`);
         return sendHtml(bot, chatId, formatError(
             'Invalid Address',
             'Please provide a valid Solana base58 address.',
         ));
     }
 
-    log('INFO', '/checkerfee', chatId, `Checking fees for mint: ${input}`);
+    log('INFO', '/checkfee', chatId, `Checking fees for mint: ${input}`);
 
     await bot.sendChatAction(chatId, 'typing');
 
     try {
         // Step 1: Find pool
-        log('INFO', '/checkerfee', chatId, 'Resolving pool from mint...');
+        log('INFO', '/checkfee', chatId, 'Resolving pool from mint...');
         const poolInfo = await findPoolByTokenMint(input);
 
         if (!poolInfo || !poolInfo.address) {
-            log('WARN', '/checkerfee', chatId, 'Pool not found for this mint');
+            log('WARN', '/checkfee', chatId, 'Pool not found for this mint');
             return sendHtml(bot, chatId, formatError(
                 'Pool Not Found',
                 'No DBC pool found for this token mint address.',
             ));
         }
 
-        log('INFO', '/checkerfee', chatId, `Pool found: ${poolInfo.address}`);
+        log('INFO', '/checkfee', chatId, `Pool found: ${poolInfo.address}`);
 
         // Step 2: Get SOL price
         let solUsd = 0;
@@ -170,13 +170,13 @@ bot.onText(/\/checkerfee(.*)/, async (msg, match) => {
             if (configResult.success) configData = configResult.data;
         } catch (_) { }
 
-        log('INFO', '/checkerfee', chatId,
+        log('INFO', '/checkfee', chatId,
             `Fees: ${feeData.quoteAmount || 0} ${feeData.quoteLabel || 'SOL'} | Ready: ${feeData.readyToClaim}`);
 
         const html = formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd, configData);
         return sendHtml(bot, chatId, html);
     } catch (e) {
-        log('ERROR', '/checkerfee', chatId, `Exception: ${e.message}`);
+        log('ERROR', '/checkfee', chatId, `Exception: ${e.message}`);
         return sendHtml(bot, chatId, formatError('Error', e.message || 'Unexpected error'));
     }
 });
