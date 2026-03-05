@@ -1,0 +1,9 @@
+{
+    "RPC_URLS": [
+        "https://lauraine-qytyxk-fast-mainnet.helius-rpc.com",
+        "https://willi-rcwr7d-fast-mainnet.helius-rpc.com/",
+        "https://pauly-6h7jj2-fast-mainnet.helius-rpc.com/"
+    ],
+    "RPC_ORIGIN": "http://localhost",
+    "JUPITER_API_KEY": "0f5dff2b-6b58-49c3-b95c-09578f3a6bef"
+}

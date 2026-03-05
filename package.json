@@ -1,0 +1,17 @@
+{
+    "name": "dbc-telegram-checker",
+    "version": "1.0.0",
+    "description": "Telegram bot for checking Meteora DBC pool fees and config",
+    "main": "src/bot.js",
+    "scripts": {
+        "start": "node src/bot.js",
+        "dev": "node --watch src/bot.js"
+    },
+    "dependencies": {
+        "@meteora-ag/dynamic-bonding-curve-sdk": "^1.5.2",
+        "@solana/web3.js": "^1.98.4",
+        "axios": "^1.6.2",
+        "bs58": "^6.0.0",
+        "node-telegram-bot-api": "^0.66.0"
+    }
+}
