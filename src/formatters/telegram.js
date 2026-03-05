@@ -51,7 +51,7 @@ function formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd, configData) {
     const label = feeData.quoteLabel || 'SOL';
     const name = (tokenMeta && tokenMeta.name) ? esc(tokenMeta.name) : 'Unknown';
     const symbol = (tokenMeta && tokenMeta.symbol) ? esc(tokenMeta.symbol) : '?';
-    const price = (label === 'SOL') ? (solUsd || 0) : (feeData.quotePrice || 0);
+    const price = feeData.quotePrice || (label === 'SOL' ? (solUsd || 0) : 0);
     const mint = poolInfo ? poolInfo.baseMint : '';
 
     const lines = [];
@@ -65,24 +65,32 @@ function formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd, configData) {
         return lines.join('\n');
     }
 
-    // Always show both, even if 0
-    const creatorQ = feeData.creatorQuoteAmount ?? 0;
-    const partnerQ = feeData.partnerQuoteAmount ?? 0;
-    const totalQ = feeData.quoteAmount || (creatorQ + partnerQ);
+    const platformFee = feeData.platformFee || 0;
+    const creatorFee = feeData.creatorFee || 0;
+    const totalAvailable = feeData.totalAvailable || (platformFee + creatorFee);
+    const totalClaimed = feeData.totalClaimed || 0;
 
+    // Total Claimed (historical)
+    if (totalClaimed > 0) {
+        lines.push(`✅ <b>Total Claimed:</b>`);
+        lines.push(`${fmtSol(totalClaimed, label)} (~${fmtUsd(totalClaimed * price)})`);
+        lines.push(``);
+    }
+
+    // Platform fee
     lines.push(`💰 Platform Fee (Available):`);
-    lines.push(`${fmtSol(partnerQ, label)} (~${fmtUsd(partnerQ * price)})`);
+    lines.push(`${fmtSol(platformFee, label)} (~${fmtUsd(platformFee * price)})`);
     lines.push(``);
 
+    // Creator fee
     lines.push(`💰 Creator Fee (Available):`);
-    lines.push(`${fmtSol(creatorQ, label)} (~${fmtUsd(creatorQ * price)})`);
+    lines.push(`${fmtSol(creatorFee, label)} (~${fmtUsd(creatorFee * price)})`);
     lines.push(``);
 
+    // Total available
     lines.push(`📊 <b>Total Available Fees:</b>`);
-    lines.push(`${fmtSol(totalQ, label)} (~${fmtUsd(totalQ * price)})`);
+    lines.push(`${fmtSol(totalAvailable, label)} (~${fmtUsd(totalAvailable * price)})`);
     lines.push(``);
-
-
 
     // Info section
     if (poolInfo) {
