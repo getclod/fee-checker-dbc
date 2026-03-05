@@ -99,30 +99,55 @@ async function getClaimableFees(poolAddress, solUsd = 0) {
             ]);
 
             if (feeMetrics && feeMetrics.current) {
-                const creatorQuoteFee = feeMetrics.current.creatorQuoteFee || feeMetrics.current.quoteFee || feeMetrics.current.creatorFee || 0;
-                const partnerQuoteFee = feeMetrics.current.partnerQuoteFee || 0;
+                const raw = feeMetrics.current;
 
+                // Safe BN/BigInt to number converter
                 const toNum = (v) => {
-                    if (typeof v.toNumber === 'function') return v.toNumber();
-                    return Number(v);
+                    if (v === null || v === undefined) return 0;
+                    if (typeof v === 'number') return v;
+                    if (typeof v === 'bigint') return Number(v);
+                    if (typeof v.toNumber === 'function') {
+                        try { return v.toNumber(); } catch (_) { return 0; }
+                    }
+                    if (typeof v.isZero === 'function' && v.isZero()) return 0;
+                    return Number(v) || 0;
                 };
 
-                const creatorQ = creatorQuoteFee ? toNum(creatorQuoteFee) / decimalsDivisor : 0;
-                const partnerQ = partnerQuoteFee ? toNum(partnerQuoteFee) / decimalsDivisor : 0;
-                const totalQ = creatorQ + partnerQ;
+                // Extract all possible fee fields (convert to real numbers first)
+                const creatorQRaw = toNum(raw.creatorQuoteFee);
+                const partnerQRaw = toNum(raw.partnerQuoteFee);
+                const totalQRaw = toNum(raw.quoteFee) || toNum(raw.totalQuoteFee);
+                const genericFee = toNum(raw.creatorFee) || toNum(raw.fee);
 
-                return {
-                    quoteAmount: totalQ,
-                    creatorQuoteAmount: creatorQ,
-                    partnerQuoteAmount: partnerQ,
-                    quoteLabel,
-                    quotePrice,
-                    solUsd: solUsd || 0,
-                    quoteUsd: totalQ * quotePrice,
-                    creatorQuoteUsd: creatorQ * quotePrice,
-                    partnerQuoteUsd: partnerQ * quotePrice,
-                    readyToClaim: totalQ > 0.0001,
-                };
+                // Calculate amounts
+                let creatorQ = creatorQRaw / decimalsDivisor;
+                let partnerQ = partnerQRaw / decimalsDivisor;
+                let totalQ = creatorQ + partnerQ;
+
+                // If both are 0 but a total/generic field has value, use that
+                if (totalQ < 0.0001 && totalQRaw > 0) {
+                    totalQ = totalQRaw / decimalsDivisor;
+                    creatorQ = totalQ; // Assume creator if can't split
+                    partnerQ = 0;
+                }
+                if (totalQ < 0.0001 && genericFee > 0) {
+                    totalQ = genericFee / decimalsDivisor;
+                    creatorQ = totalQ;
+                    partnerQ = 0;
+                }
+
+                if (totalQ > 0.0001) {
+                    return {
+                        quoteAmount: totalQ,
+                        creatorQuoteAmount: creatorQ,
+                        partnerQuoteAmount: partnerQ,
+                        quoteLabel,
+                        quotePrice,
+                        solUsd: solUsd || 0,
+                        quoteUsd: totalQ * quotePrice,
+                        readyToClaim: true,
+                    };
+                }
             }
         } catch (_) {
             // fall through to raw parsing
