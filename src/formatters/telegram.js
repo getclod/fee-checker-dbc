@@ -1,4 +1,5 @@
-// telegram.js — Elegant monospace formatter for Telegram HTML messages
+// telegram.js — Clean minimal formatter for Telegram
+// Uses mixed HTML (bold, code, links) for a modern card-style look
 
 const MAX_MSG_LEN = 4000;
 
@@ -14,49 +15,43 @@ function shortAddr(addr, front = 4, back = 4) {
     return `${addr.slice(0, front)}...${addr.slice(-back)}`;
 }
 
-function fmtNum(n, decimals = 4) {
-    if (n === null || n === undefined) return '0';
-    const v = Number(n);
-    if (!Number.isFinite(v)) return '0';
-    if (Math.abs(v) < 0.0001) return '0';
-    return v.toLocaleString('en-US', { maximumFractionDigits: decimals, minimumFractionDigits: 2 });
+function fmtSol(n) {
+    if (!n || !Number.isFinite(Number(n))) return '0.0000';
+    return Number(n).toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
 }
 
 function fmtUsd(n) {
-    if (n === null || n === undefined || Number(n) === 0) return '$0.00';
-    const v = Number(n);
-    if (!Number.isFinite(v)) return '$0.00';
-    return '$' + v.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+    if (!n || !Number.isFinite(Number(n)) || Number(n) < 0.01) return '$0.00';
+    return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function solscanToken(mint) {
+    return `https://solscan.io/token/${mint}`;
+}
+
+function solscanAccount(addr) {
+    return `https://solscan.io/account/${addr}`;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// START / HELP
+// START
 // ──────────────────────────────────────────────────────────────────────────────
 
 function formatStartMessage() {
-    const lines = [
+    return [
+        `<b>DBC Checker Bot</b>`,
+        `Meteora Dynamic Bonding Curve`,
         ``,
-        `  DBC CHECKER BOT`,
-        `  ───────────────────────────`,
-        `  Meteora Dynamic Bonding Curve`,
-        `  On-chain checker for Solana`,
+        `<b>Commands</b>`,
         ``,
+        `/checkerfee <code>&lt;mint&gt;</code>`,
+        `Check claimable trading fees`,
         ``,
-        `  COMMANDS`,
-        `  ───────────────────────────`,
+        `/checkerconfig <code>&lt;mint&gt;</code>`,
+        `Read pool configuration`,
         ``,
-        `  /checkerfee   &lt;mint&gt;`,
-        `  Check claimable trading fees`,
-        ``,
-        `  /checkerconfig &lt;mint&gt;`,
-        `  Read pool configuration`,
-        ``,
-        ``,
-        `  Paste any token CA/mint address`,
-        `  after the command to begin.`,
-        ``,
-    ];
-    return `<pre>${lines.join('\n')}</pre>`;
+        `Paste any token mint address after the command.`,
+    ].join('\n');
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -65,88 +60,78 @@ function formatStartMessage() {
 
 function formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd) {
     const label = feeData.quoteLabel || 'SOL';
-    const tokenName = (tokenMeta && tokenMeta.name) ? tokenMeta.name : 'Unknown';
-    const tokenSymbol = (tokenMeta && tokenMeta.symbol) ? tokenMeta.symbol : '?';
+    const name = (tokenMeta && tokenMeta.name) ? esc(tokenMeta.name) : 'Unknown';
+    const symbol = (tokenMeta && tokenMeta.symbol) ? esc(tokenMeta.symbol) : '?';
+    const price = (label === 'SOL') ? (solUsd || 0) : (feeData.quotePrice || 0);
+    const mint = poolInfo ? poolInfo.baseMint : '';
 
     const lines = [];
 
-    // Header
-    lines.push(``);
-    lines.push(`  FEE CHECKER`);
-    lines.push(`  ───────────────────────────`);
-
-    // Token identity
-    lines.push(`  ${esc(tokenName)} (${esc(tokenSymbol)})`);
+    // Title
+    lines.push(`<b>${name}</b>  <code>${symbol}</code>`);
+    if (mint) {
+        lines.push(`<a href="${solscanToken(mint)}">${shortAddr(mint, 6, 4)}</a>`);
+    }
     lines.push(``);
 
     if (feeData.error) {
-        lines.push(`  Status    Error`);
-        lines.push(`  Detail    ${esc(feeData.error)}`);
-        lines.push(``);
-        addPoolLinks(lines, poolInfo);
-        return wrap(lines);
+        lines.push(`Status: <code>Error</code>`);
+        lines.push(`${esc(feeData.error)}`);
+        return lines.join('\n');
     }
 
     if (!feeData.readyToClaim) {
-        lines.push(`  Status    No fees to claim`);
-        lines.push(``);
-        addPoolLinks(lines, poolInfo);
-        return wrap(lines);
+        lines.push(`<b>No claimable fees</b>`);
+        addPoolFooter(lines, poolInfo);
+        return lines.join('\n');
     }
 
-    // Fee amounts
+    // Amounts
     const totalQ = feeData.quoteAmount || 0;
     const creatorQ = feeData.creatorQuoteAmount ?? 0;
     const partnerQ = feeData.partnerQuoteAmount ?? 0;
-    const price = (label === 'SOL') ? (solUsd || 0) : (feeData.quotePrice || 0);
 
-    lines.push(`  CLAIMABLE FEES`);
-    lines.push(`  ───────────────────────────`);
+    lines.push(`<b>Claimable Fees</b>`);
     lines.push(``);
+
+    if (creatorQ > 0) {
+        lines.push(`Creator`);
+        lines.push(`<code>${fmtSol(creatorQ)} ${label}</code>  ~${fmtUsd(creatorQ * price)}`);
+        lines.push(``);
+    }
+
+    if (partnerQ > 0) {
+        lines.push(`Partner`);
+        lines.push(`<code>${fmtSol(partnerQ)} ${label}</code>  ~${fmtUsd(partnerQ * price)}`);
+        lines.push(``);
+    }
 
     if (creatorQ > 0 && partnerQ > 0) {
-        lines.push(`  Creator   ${fmtNum(creatorQ)} ${label}`);
-        lines.push(`            ${fmtUsd(creatorQ * price)}`);
+        lines.push(`<b>Total</b>`);
+        lines.push(`<code>${fmtSol(totalQ)} ${label}</code>  ~${fmtUsd(totalQ * price)}`);
         lines.push(``);
-        lines.push(`  Partner   ${fmtNum(partnerQ)} ${label}`);
-        lines.push(`            ${fmtUsd(partnerQ * price)}`);
-        lines.push(``);
-        lines.push(`  ───────────────────────────`);
-        lines.push(`  Total     ${fmtNum(totalQ)} ${label}`);
-        lines.push(`            ${fmtUsd(totalQ * price)}`);
-    } else if (creatorQ > 0) {
-        lines.push(`  Creator   ${fmtNum(creatorQ)} ${label}`);
-        lines.push(`            ${fmtUsd(creatorQ * price)}`);
-    } else if (partnerQ > 0) {
-        lines.push(`  Partner   ${fmtNum(partnerQ)} ${label}`);
-        lines.push(`            ${fmtUsd(partnerQ * price)}`);
-    } else {
-        lines.push(`  Total     ${fmtNum(totalQ)} ${label}`);
-        lines.push(`            ${fmtUsd(totalQ * price)}`);
     }
 
-    lines.push(``);
+    if (creatorQ === 0 && partnerQ === 0 && totalQ > 0) {
+        lines.push(`Total`);
+        lines.push(`<code>${fmtSol(totalQ)} ${label}</code>  ~${fmtUsd(totalQ * price)}`);
+        lines.push(``);
+    }
 
-    // Price reference
+    // Price ref
     if (price > 0) {
-        lines.push(`  ${label} Price  ${fmtUsd(price)}`);
+        lines.push(`${label} = ${fmtUsd(price)}`);
         lines.push(``);
     }
 
-    // Pool links
-    addPoolLinks(lines, poolInfo);
-
-    return wrap(lines);
+    addPoolFooter(lines, poolInfo);
+    return lines.join('\n');
 }
 
-function addPoolLinks(lines, poolInfo) {
+function addPoolFooter(lines, poolInfo) {
     if (!poolInfo) return;
-    lines.push(`  POOL INFO`);
-    lines.push(`  ───────────────────────────`);
-    lines.push(`  Pool    ${esc(poolInfo.address)}`);
-    lines.push(`  Mint    ${esc(poolInfo.baseMint)}`);
-    lines.push(`  Config  ${esc(poolInfo.config)}`);
-    lines.push(``);
+    lines.push(`<b>Pool</b>  <a href="${solscanAccount(poolInfo.address)}">${shortAddr(poolInfo.address, 6, 4)}</a>`);
+    lines.push(`<b>Config</b>  <a href="${solscanAccount(poolInfo.config)}">${shortAddr(poolInfo.config, 6, 4)}</a>`);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -155,79 +140,54 @@ function addPoolLinks(lines, poolInfo) {
 
 function formatConfigMessage(data, configAddress, poolInfo) {
     const lines = [];
+    const cfgAddr = configAddress || (poolInfo && poolInfo.config) || '';
 
-    // Header
-    lines.push(``);
-    lines.push(`  CONFIG CHECKER`);
-    lines.push(`  ───────────────────────────`);
-
+    // Title
+    lines.push(`<b>Config Checker</b>`);
     if (poolInfo) {
-        lines.push(`  Pool    ${esc(poolInfo.address)}`);
-        lines.push(`  Mint    ${esc(poolInfo.baseMint)}`);
-        lines.push(`  Config  ${esc(configAddress || poolInfo.config)}`);
+        lines.push(`<a href="${solscanAccount(poolInfo.address)}">Pool ${shortAddr(poolInfo.address, 6, 4)}</a>  |  <a href="${solscanToken(poolInfo.baseMint)}">Mint ${shortAddr(poolInfo.baseMint, 6, 4)}</a>`);
     }
     lines.push(``);
 
-    // Token info
-    lines.push(`  TOKEN`);
-    lines.push(`  ───────────────────────────`);
-    lines.push(`  Type       ${esc(data.tokenType)}`);
-    lines.push(`  Decimals   ${data.tokenDecimal}`);
-    lines.push(`  Activation ${esc(data.activationType)}`);
+    // Token
+    lines.push(`<b>Token</b>`);
+    lines.push(`Type <code>${esc(data.tokenType)}</code>  Decimals <code>${data.tokenDecimal}</code>`);
+    lines.push(`Activation <code>${esc(data.activationType)}</code>`);
     lines.push(``);
 
-    // Fee schedule
+    // Fee Schedule
     if (data.baseFee) {
         const bf = data.baseFee;
-        lines.push(`  FEE SCHEDULE`);
-        lines.push(`  ───────────────────────────`);
-        lines.push(`  Mode       ${esc(bf.mode)}`);
-        lines.push(`  Start      ${esc(bf.startFee)}`);
-        lines.push(`  End        ${esc(bf.endFee)}`);
-        lines.push(`  Duration   ${esc(bf.duration)}`);
-        lines.push(`  Periods    ${bf.numberOfPeriods}`);
-        lines.push(`  Frequency  ${bf.periodFrequency}`);
+        lines.push(`<b>Fee Schedule</b>`);
+        lines.push(`Mode <code>${esc(bf.mode)}</code>`);
+        lines.push(`Start <code>${esc(bf.startFee)}</code>  End <code>${esc(bf.endFee)}</code>`);
+        lines.push(`Duration <code>${esc(bf.duration)}</code>  Periods <code>${bf.numberOfPeriods}</code>`);
         if (bf.reductionFactor !== null && bf.reductionFactor !== undefined) {
             const r = 1 - (bf.reductionFactor / 10_000);
-            lines.push(`  Reduction  ${bf.reductionFactor} bps (x${r.toFixed(4)})`);
+            lines.push(`Reduction <code>${bf.reductionFactor} bps</code> (x${r.toFixed(4)})`);
         }
         lines.push(``);
     }
 
-    // LP distribution
-    if (data.lpDistribution) {
+    // LP + Fee Split
+    if (data.lpDistribution && data.tradingFeeSplit) {
         const lp = data.lpDistribution;
-        lines.push(`  LP DISTRIBUTION`);
-        lines.push(`  ───────────────────────────`);
-        lines.push(`  Creator LP       ${lp.creatorLp}%`);
-        lines.push(`  Creator Locked   ${lp.creatorLocked}%`);
-        lines.push(`  Partner LP       ${lp.partnerLp}%`);
-        lines.push(`  Partner Locked   ${lp.partnerLocked}%`);
+        const ts = data.tradingFeeSplit;
+        lines.push(`<b>LP Distribution</b>`);
+        lines.push(`Creator <code>${lp.creatorLp}%</code> LP  <code>${lp.creatorLocked}%</code> locked`);
+        lines.push(`Partner <code>${lp.partnerLp}%</code> LP  <code>${lp.partnerLocked}%</code> locked`);
+        lines.push(``);
+        lines.push(`<b>Fee Split</b>`);
+        lines.push(`Creator <code>${ts.creator}%</code>  Partner <code>${ts.partner}%</code>`);
         lines.push(``);
     }
 
-    // Trading fee split
-    if (data.tradingFeeSplit) {
-        lines.push(`  TRADING FEE SPLIT`);
-        lines.push(`  ───────────────────────────`);
-        lines.push(`  Creator    ${data.tradingFeeSplit.creator}%`);
-        lines.push(`  Partner    ${data.tradingFeeSplit.partner}%`);
-        lines.push(``);
-    }
-
-    // Dynamic fee
+    // Dynamic Fee
     if (data.dynamicFee) {
         const df = data.dynamicFee;
-        lines.push(`  DYNAMIC FEE`);
-        lines.push(`  ───────────────────────────`);
-        lines.push(`  Status     ${df.status}`);
+        lines.push(`<b>Dynamic Fee</b>  <code>${df.status}</code>`);
         if (df.status === 'ON') {
-            lines.push(`  Bin Step   ${df.binStep}`);
-            lines.push(`  Filter     ${df.filterPeriod}`);
-            lines.push(`  Decay      ${df.decayPeriod}`);
-            lines.push(`  Reduction  ${df.reductionFactor}`);
-            lines.push(`  Max Vol    ${df.maxVolatilityAccumulator}`);
-            lines.push(`  Var Ctrl   ${df.variableFeeControl}`);
+            lines.push(`Bin <code>${df.binStep}</code>  Filter <code>${df.filterPeriod}</code>  Decay <code>${df.decayPeriod}</code>`);
         }
         lines.push(``);
     }
@@ -235,30 +195,23 @@ function formatConfigMessage(data, configAddress, poolInfo) {
     // Migration
     if (data.migrationDetails) {
         const m = data.migrationDetails;
-        lines.push(`  MIGRATION`);
-        lines.push(`  ───────────────────────────`);
-        lines.push(`  Option     ${esc(m.option)}`);
-        if (m.quoteThresholdSol) {
-            lines.push(`  Threshold  ${m.quoteThresholdSol} SOL`);
-        }
-        if (m.startMcQuote !== null) {
-            lines.push(`  Start MC   ${fmtMc(m.startMcQuote)}`);
-        }
-        if (m.endMcQuote !== null) {
-            lines.push(`  End MC     ${fmtMc(m.endMcQuote)}`);
+        lines.push(`<b>Migration</b>  <code>${esc(m.option)}</code>`);
+        if (m.quoteThresholdSol) lines.push(`Threshold <code>${m.quoteThresholdSol} SOL</code>`);
+        if (m.startMcQuote !== null && m.endMcQuote !== null) {
+            lines.push(`MC  <code>${fmtMc(m.startMcQuote)}</code> → <code>${fmtMc(m.endMcQuote)}</code>`);
         }
         lines.push(``);
     }
 
     // Addresses
-    lines.push(`  ADDRESSES`);
-    lines.push(`  ───────────────────────────`);
-    lines.push(`  Quote Mint  ${esc(data.quoteMint)}`);
-    lines.push(`  Fee Claimer ${esc(shortAddr(data.feeClaimer, 6, 6))}`);
-    lines.push(`  Collect     ${esc(data.collectFeeMode)}`);
-    lines.push(``);
+    lines.push(`<b>Addresses</b>`);
+    lines.push(`Quote <code>${shortAddr(esc(data.quoteMint), 6, 4)}</code>`);
+    lines.push(`Claimer <code>${shortAddr(esc(data.feeClaimer), 6, 4)}</code>`);
+    lines.push(`Collect <code>${esc(data.collectFeeMode)}</code>`);
 
-    return wrap(lines);
+    const result = lines.join('\n');
+    if (result.length > MAX_MSG_LEN) return result.slice(0, MAX_MSG_LEN - 10) + '\n...';
+    return result;
 }
 
 function fmtMc(value) {
@@ -273,27 +226,7 @@ function fmtMc(value) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 function formatError(title, message) {
-    const lines = [
-        ``,
-        `  ${esc(title)}`,
-        `  ───────────────────────────`,
-        ``,
-        `  ${esc(message)}`,
-        ``,
-    ];
-    return `<pre>${lines.join('\n')}</pre>`;
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Util
-// ──────────────────────────────────────────────────────────────────────────────
-
-function wrap(lines) {
-    const body = lines.join('\n');
-    if (body.length > MAX_MSG_LEN) {
-        return `<pre>${body.slice(0, MAX_MSG_LEN - 20)}\n...</pre>`;
-    }
-    return `<pre>${body}</pre>`;
+    return `<b>${esc(title)}</b>\n\n${esc(message)}`;
 }
 
 module.exports = {
