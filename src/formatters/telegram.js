@@ -32,13 +32,14 @@ function formatStartMessage() {
         ``,
         `📋 <b>Commands:</b>`,
         ``,
-        `  /checkfee <code>&lt;mint&gt;</code>`,
+        `  /fee <code>&lt;mint&gt;</code>`,
         `  Check claimable trading fees`,
         ``,
-        `  /checkconfig <code>&lt;mint&gt;</code>`,
+        `  /config <code>&lt;mint&gt;</code>`,
         `  Read pool config details`,
         ``,
-        `Paste any token CA after the command.`,
+        `💡 You can also reply to any message`,
+        `containing a CA with /fee or /config`,
     ].join('\n');
 }
 

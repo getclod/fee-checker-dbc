@@ -19,7 +19,7 @@ function createRpcConnection() {
 
 /**
  * Get claimable fees for a DBC pool (read-only).
- * Returns { quoteAmount, quoteLabel, quotePrice, quoteUsd, readyToClaim }
+ * Mirrors DBC_v14/src/core/feeManager.js getClaimableFees exactly.
  */
 async function getClaimableFees(poolAddress, solUsd = 0) {
     const fail = (err) => ({
@@ -33,22 +33,22 @@ async function getClaimableFees(poolAddress, solUsd = 0) {
         const connection = createRpcConnection();
         const poolPubkey = new PublicKey(poolAddress);
 
-        // ── Detect quote mint ────────────────────────────────────────────────
-        let quoteDecimals = 9;
-        let quoteLabel = 'SOL';
-        let quotePrice = solUsd || 0;
+        // ── Try SDK first ────────────────────────────────────────────────────
+        try {
+            const { DynamicBondingCurveClient } = require('@meteora-ag/dynamic-bonding-curve-sdk');
+            const dbcClient = new DynamicBondingCurveClient(connection, 'confirmed');
 
-        async function detectQuoteMint(conn, poolPk) {
-            // Try SDK path
+            // Detect quote mint from pool state
+            let quoteDecimals = 9;
+            let quoteLabel = 'SOL';
+            let quotePrice = solUsd || 0;
+
             try {
-                const { DynamicBondingCurveClient } = require('@meteora-ag/dynamic-bonding-curve-sdk');
-                const client = new DynamicBondingCurveClient(conn, 'confirmed');
-                const poolState = await client.state.getPool(poolPk);
-
+                const poolState = await dbcClient.state.getPool(poolPubkey);
                 if (poolState && poolState.config) {
                     const configPk = typeof poolState.config.toBase58 === 'function'
-                        ? poolState.config : new PublicKey(String(poolState.config));
-                    const config = await client.state.getPoolConfig(configPk);
+                        ? poolState.config.toBase58() : String(poolState.config);
+                    const config = await dbcClient.state.getPoolConfig(new PublicKey(configPk));
                     if (config && config.quoteMint) {
                         const qm = typeof config.quoteMint.toBase58 === 'function'
                             ? config.quoteMint.toBase58() : String(config.quoteMint);
@@ -56,104 +56,57 @@ async function getClaimableFees(poolAddress, solUsd = 0) {
                         else if (qm === USDC_MINT) { quoteDecimals = 6; quoteLabel = 'USDC'; quotePrice = 1; }
                         else {
                             try {
-                                const mi = await conn.getParsedAccountInfo(new PublicKey(qm), { commitment: 'confirmed' });
+                                const mi = await connection.getParsedAccountInfo(new PublicKey(qm), { commitment: 'confirmed' });
                                 const dec = mi?.value?.data?.parsed?.info?.decimals;
                                 if (typeof dec === 'number') quoteDecimals = dec;
                             } catch (_) { }
                         }
-                        return;
                     }
                 }
             } catch (_) { }
 
-            // Fallback: parse from account data
-            try {
-                const info = await conn.getAccountInfo(poolPk, 'confirmed');
-                if (info && info.data && info.data.length >= 104) {
-                    const qm = new PublicKey(info.data.slice(72, 104)).toBase58();
-                    if (qm === USD1_MINT) { quoteDecimals = 6; quoteLabel = 'USD1'; quotePrice = 1; }
-                    else if (qm === USDC_MINT) { quoteDecimals = 6; quoteLabel = 'USDC'; quotePrice = 1; }
-                    else {
-                        try {
-                            const mi = await conn.getParsedAccountInfo(new PublicKey(qm), { commitment: 'confirmed' });
-                            const dec = mi?.value?.data?.parsed?.info?.decimals;
-                            if (typeof dec === 'number') quoteDecimals = dec;
-                        } catch (_) { }
-                    }
-                }
-            } catch (_) { }
-        }
+            const decimalsDivisor = Math.pow(10, quoteDecimals);
 
-        await detectQuoteMint(connection, poolPubkey);
-
-        const decimalsDivisor = Math.pow(10, quoteDecimals);
-
-        // ── SDK fee metrics ──────────────────────────────────────────────────
-        try {
-            const { DynamicBondingCurveClient } = require('@meteora-ag/dynamic-bonding-curve-sdk');
-            const dbcClient = new DynamicBondingCurveClient(connection, 'confirmed');
-
+            // Get fee metrics
             const feeMetrics = await Promise.race([
                 dbcClient.state.getPoolFeeMetrics(poolPubkey),
                 new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000)),
             ]);
 
             if (feeMetrics && feeMetrics.current) {
-                const raw = feeMetrics.current;
+                // Try different field names — same as DBC_v14 original
+                const creatorQuoteFee = feeMetrics.current.creatorQuoteFee
+                    || feeMetrics.current.quoteFee
+                    || feeMetrics.current.creatorFee
+                    || 0;
 
-                // Safe BN/BigInt to number converter
-                const toNum = (v) => {
-                    if (v === null || v === undefined) return 0;
-                    if (typeof v === 'number') return v;
-                    if (typeof v === 'bigint') return Number(v);
-                    if (typeof v.toNumber === 'function') {
-                        try { return v.toNumber(); } catch (_) { return 0; }
-                    }
-                    if (typeof v.isZero === 'function' && v.isZero()) return 0;
-                    return Number(v) || 0;
-                };
-
-                // Extract all possible fee fields (convert to real numbers first)
-                const creatorQRaw = toNum(raw.creatorQuoteFee);
-                const partnerQRaw = toNum(raw.partnerQuoteFee);
-                const totalQRaw = toNum(raw.quoteFee) || toNum(raw.totalQuoteFee);
-                const genericFee = toNum(raw.creatorFee) || toNum(raw.fee);
-
-                // Calculate amounts
-                let creatorQ = creatorQRaw / decimalsDivisor;
-                let partnerQ = partnerQRaw / decimalsDivisor;
-                let totalQ = creatorQ + partnerQ;
-
-                // If both are 0 but a total/generic field has value, use that
-                if (totalQ < 0.0001 && totalQRaw > 0) {
-                    totalQ = totalQRaw / decimalsDivisor;
-                    creatorQ = totalQ; // Assume creator if can't split
-                    partnerQ = 0;
-                }
-                if (totalQ < 0.0001 && genericFee > 0) {
-                    totalQ = genericFee / decimalsDivisor;
-                    creatorQ = totalQ;
-                    partnerQ = 0;
+                let quoteAmount = 0;
+                if (creatorQuoteFee) {
+                    const rawAmount = typeof creatorQuoteFee.toNumber === 'function'
+                        ? creatorQuoteFee.toNumber()
+                        : (typeof creatorQuoteFee === 'bigint' || typeof creatorQuoteFee === 'number')
+                            ? Number(creatorQuoteFee) : 0;
+                    quoteAmount = rawAmount / decimalsDivisor;
                 }
 
-                if (totalQ > 0.0001) {
+                if (quoteAmount > 0.0001) {
                     return {
-                        quoteAmount: totalQ,
-                        creatorQuoteAmount: creatorQ,
-                        partnerQuoteAmount: partnerQ,
-                        quoteLabel,
-                        quotePrice,
+                        quoteAmount,
+                        creatorQuoteAmount: quoteAmount,
+                        partnerQuoteAmount: 0,
+                        quoteLabel, quotePrice,
                         solUsd: solUsd || 0,
-                        quoteUsd: totalQ * quotePrice,
+                        quoteUsd: quoteAmount * quotePrice,
                         readyToClaim: true,
                     };
                 }
+                // If SDK returned 0, DON'T return — fall through to raw parsing
             }
         } catch (_) {
             // fall through to raw parsing
         }
 
-        // ── Raw data fallback ────────────────────────────────────────────────
+        // ── Raw data fallback (same as DBC_v14) ─────────────────────────────
         const accountInfo = await Promise.race([
             connection.getAccountInfo(poolPubkey),
             new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000)),
@@ -162,6 +115,28 @@ async function getClaimableFees(poolAddress, solUsd = 0) {
         if (!accountInfo) return fail('Pool not found or timeout');
 
         const data = accountInfo.data;
+
+        // Detect quote mint from raw data
+        let quoteDecimals = 9;
+        let quoteLabel = 'SOL';
+        let quotePrice = solUsd || 0;
+
+        if (data && data.length >= 104) {
+            try {
+                const qm = new PublicKey(data.slice(72, 104)).toBase58();
+                if (qm === USD1_MINT) { quoteDecimals = 6; quoteLabel = 'USD1'; quotePrice = 1; }
+                else if (qm === USDC_MINT) { quoteDecimals = 6; quoteLabel = 'USDC'; quotePrice = 1; }
+                else {
+                    try {
+                        const mi = await connection.getParsedAccountInfo(new PublicKey(qm), { commitment: 'confirmed' });
+                        const dec = mi?.value?.data?.parsed?.info?.decimals;
+                        if (typeof dec === 'number') quoteDecimals = dec;
+                    } catch (_) { }
+                }
+            } catch (_) { }
+        }
+
+        const decimalsDivisor = Math.pow(10, quoteDecimals);
         let quoteAmount = 0;
 
         const offsets = [360, 376, 392, 408, 424];
@@ -179,8 +154,7 @@ async function getClaimableFees(poolAddress, solUsd = 0) {
             quoteAmount,
             creatorQuoteAmount: quoteAmount,
             partnerQuoteAmount: 0,
-            quoteLabel,
-            quotePrice,
+            quoteLabel, quotePrice,
             solUsd: solUsd || 0,
             quoteUsd: quoteAmount * quotePrice,
             readyToClaim: quoteAmount > 0.0001,

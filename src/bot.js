@@ -29,22 +29,49 @@ function log(level, cmd, chatId, msg) {
 
 // ──── Helpers ────────────────────────────────────────────────────────────────
 
-function extractMint(text, command) {
-    const parts = text.trim().split(/\s+/);
-    if (parts.length < 2) return null;
-    return parts[1];
-}
-
 function isValidBase58(str) {
     if (!str || str.length < 32 || str.length > 50) return false;
     return /^[1-9A-HJ-NP-Za-km-z]+$/.test(str);
 }
 
+/**
+ * Extract a Solana address from text.
+ * Looks for any base58 string that's 32-50 chars long.
+ */
+function extractAddress(text) {
+    if (!text) return null;
+    const matches = text.match(/[1-9A-HJ-NP-Za-km-z]{32,50}/g);
+    if (!matches) return null;
+    // Return the first valid-looking address
+    for (const m of matches) {
+        if (isValidBase58(m)) return m;
+    }
+    return null;
+}
+
+/**
+ * Get mint address from command args OR from the replied-to message.
+ * Supports: /fee <mint>  OR  reply to a message containing a CA with /fee
+ */
+function getMintFromMessage(msg, match) {
+    // First try: argument after command
+    const arg = (match[1] || '').trim();
+    if (arg && isValidBase58(arg)) return arg;
+
+    // Second try: extract from replied message
+    if (msg.reply_to_message) {
+        const replyText = msg.reply_to_message.text || msg.reply_to_message.caption || '';
+        const addr = extractAddress(replyText);
+        if (addr) return addr;
+    }
+
+    return null;
+}
+
 async function sendHtml(bot, chatId, html) {
     try {
-        await bot.sendMessage(chatId, html, { parse_mode: 'HTML' });
+        await bot.sendMessage(chatId, html, { parse_mode: 'HTML', disable_web_page_preview: true });
     } catch (e) {
-        // If HTML parse fails, try sending as plain text
         const plain = html.replace(/<[^>]+>/g, '');
         await bot.sendMessage(chatId, plain);
     }
@@ -65,42 +92,32 @@ bot.onText(/\/start/, (msg) => {
     sendHtml(bot, chatId, formatStartMessage());
 });
 
-// ── /checkconfig <mint> ────────────────────────────────────────────────────
+// ── /config <mint> ───────────────────────────────────────────────────────────
 
-bot.onText(/\/checkconfig(.*)/, async (msg, match) => {
+bot.onText(/\/config(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const input = (match[1] || '').trim();
+    const mint = getMintFromMessage(msg, match);
 
-    if (!input) {
-        log('WARN', '/checkconfig', chatId, 'No mint address provided');
+    if (!mint) {
+        log('WARN', '/config', chatId, 'No mint address found');
         return sendHtml(bot, chatId, formatError(
-            'Missing Argument',
-            'Usage: /checkconfig <token_mint_address>',
+            'Missing Address',
+            'Usage: /config <mint>\nOr reply to a message containing a CA.',
         ));
     }
 
-    if (!isValidBase58(input)) {
-        log('WARN', '/checkconfig', chatId, `Invalid address: ${input.slice(0, 12)}...`);
-        return sendHtml(bot, chatId, formatError(
-            'Invalid Address',
-            'Please provide a valid Solana base58 address.',
-        ));
-    }
-
-    log('INFO', '/checkconfig', chatId, `Checking config for mint: ${input}`);
-
-    // Send "processing" indicator
+    log('INFO', '/config', chatId, `Checking config for: ${mint}`);
     await bot.sendChatAction(chatId, 'typing');
 
     try {
-        const result = await getConfigFromMint(input);
+        const result = await getConfigFromMint(mint);
 
         if (!result.success) {
-            log('WARN', '/checkconfig', chatId, `Config check failed: ${result.error}`);
+            log('WARN', '/config', chatId, `Failed: ${result.error}`);
             return sendHtml(bot, chatId, formatError('Config Check Failed', result.error));
         }
 
-        log('INFO', '/checkconfig', chatId, `Config read successfully`);
+        log('INFO', '/config', chatId, 'Config read OK');
         const html = formatConfigMessage(
             result.data,
             result.configAddress || (result.poolInfo && result.poolInfo.config),
@@ -108,75 +125,60 @@ bot.onText(/\/checkconfig(.*)/, async (msg, match) => {
         );
         return sendHtml(bot, chatId, html);
     } catch (e) {
-        log('ERROR', '/checkconfig', chatId, `Exception: ${e.message}`);
+        log('ERROR', '/config', chatId, `Exception: ${e.message}`);
         return sendHtml(bot, chatId, formatError('Error', e.message || 'Unexpected error'));
     }
 });
 
-// ── /checkfee <mint> ───────────────────────────────────────────────────────
+// ── /fee <mint> ──────────────────────────────────────────────────────────────
 
-bot.onText(/\/checkfee(.*)/, async (msg, match) => {
+bot.onText(/\/fee(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const input = (match[1] || '').trim();
+    const mint = getMintFromMessage(msg, match);
 
-    if (!input) {
-        log('WARN', '/checkfee', chatId, 'No mint address provided');
+    if (!mint) {
+        log('WARN', '/fee', chatId, 'No mint address found');
         return sendHtml(bot, chatId, formatError(
-            'Missing Argument',
-            'Usage: /checkfee <token_mint_address>',
+            'Missing Address',
+            'Usage: /fee <mint>\nOr reply to a message containing a CA.',
         ));
     }
 
-    if (!isValidBase58(input)) {
-        log('WARN', '/checkfee', chatId, `Invalid address: ${input.slice(0, 12)}...`);
-        return sendHtml(bot, chatId, formatError(
-            'Invalid Address',
-            'Please provide a valid Solana base58 address.',
-        ));
-    }
-
-    log('INFO', '/checkfee', chatId, `Checking fees for mint: ${input}`);
-
+    log('INFO', '/fee', chatId, `Checking fees for: ${mint}`);
     await bot.sendChatAction(chatId, 'typing');
 
     try {
-        // Step 1: Find pool
-        log('INFO', '/checkfee', chatId, 'Resolving pool from mint...');
-        const poolInfo = await findPoolByTokenMint(input);
+        // Find pool
+        const poolInfo = await findPoolByTokenMint(mint);
 
         if (!poolInfo || !poolInfo.address) {
-            log('WARN', '/checkfee', chatId, 'Pool not found for this mint');
-            return sendHtml(bot, chatId, formatError(
-                'Pool Not Found',
-                'No DBC pool found for this token mint address.',
-            ));
+            log('WARN', '/fee', chatId, 'Pool not found');
+            return sendHtml(bot, chatId, formatError('Pool Not Found', 'No DBC pool found for this mint.'));
         }
 
-        log('INFO', '/checkfee', chatId, `Pool found: ${poolInfo.address}`);
+        log('INFO', '/fee', chatId, `Pool: ${poolInfo.address}`);
 
-        // Step 2: Get SOL price
+        // Get SOL price + fees + token metadata + config (parallel where possible)
         let solUsd = 0;
         try { solUsd = await getSolUsdPrice(); } catch (_) { solUsd = 0; }
 
-        // Step 3: Get claimable fees
         const feeData = await getClaimableFees(poolInfo.address, solUsd);
 
-        // Step 4: Get token metadata + config data (for fee claimer / config creator)
         let tokenMeta = { name: '', symbol: '' };
         let configData = null;
-        try { tokenMeta = await fetchTokenMetadata(poolInfo.baseMint || input); } catch (_) { }
+        try { tokenMeta = await fetchTokenMetadata(poolInfo.baseMint || mint); } catch (_) { }
         try {
-            const configResult = await getConfigFromMint(input);
+            const configResult = await getConfigFromMint(mint);
             if (configResult.success) configData = configResult.data;
         } catch (_) { }
 
-        log('INFO', '/checkfee', chatId,
+        log('INFO', '/fee', chatId,
             `Fees: ${feeData.quoteAmount || 0} ${feeData.quoteLabel || 'SOL'} | Ready: ${feeData.readyToClaim}`);
 
         const html = formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd, configData);
         return sendHtml(bot, chatId, html);
     } catch (e) {
-        log('ERROR', '/checkfee', chatId, `Exception: ${e.message}`);
+        log('ERROR', '/fee', chatId, `Exception: ${e.message}`);
         return sendHtml(bot, chatId, formatError('Error', e.message || 'Unexpected error'));
     }
 });
