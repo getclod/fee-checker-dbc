@@ -161,14 +161,19 @@ bot.onText(/\/checkerfee(.*)/, async (msg, match) => {
         // Step 3: Get claimable fees
         const feeData = await getClaimableFees(poolInfo.address, solUsd);
 
-        // Step 4: Get token metadata
+        // Step 4: Get token metadata + config data (for fee claimer / config creator)
         let tokenMeta = { name: '', symbol: '' };
+        let configData = null;
         try { tokenMeta = await fetchTokenMetadata(poolInfo.baseMint || input); } catch (_) { }
+        try {
+            const configResult = await getConfigFromMint(input);
+            if (configResult.success) configData = configResult.data;
+        } catch (_) { }
 
         log('INFO', '/checkerfee', chatId,
             `Fees: ${feeData.quoteAmount || 0} ${feeData.quoteLabel || 'SOL'} | Ready: ${feeData.readyToClaim}`);
 
-        const html = formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd);
+        const html = formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd, configData);
         return sendHtml(bot, chatId, html);
     } catch (e) {
         log('ERROR', '/checkerfee', chatId, `Exception: ${e.message}`);
