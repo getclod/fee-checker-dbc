@@ -51,13 +51,12 @@ function formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd, configData) {
     const name = (tokenMeta && tokenMeta.name) ? esc(tokenMeta.name) : 'Unknown';
     const symbol = (tokenMeta && tokenMeta.symbol) ? esc(tokenMeta.symbol) : '?';
     const price = (label === 'SOL') ? (solUsd || 0) : (feeData.quotePrice || 0);
+    const mint = poolInfo ? poolInfo.baseMint : '';
 
     const lines = [];
 
-    lines.push(`✅ <b>Fee Check Results</b>`);
-    lines.push(``);
-    lines.push(`Token:`);
-    lines.push(`${name} (${symbol})`);
+    lines.push(`🪙 <b>${name}</b> - $${symbol}`);
+    lines.push(`<code>${mint}</code>`);
     lines.push(``);
 
     if (feeData.error) {
@@ -82,10 +81,7 @@ function formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd, configData) {
     lines.push(`${fmtSol(totalQ, label)} (~${fmtUsd(totalQ * price)})`);
     lines.push(``);
 
-    if (price > 0) {
-        lines.push(`💲 1 ${label} = ${fmtUsd(price)}`);
-        lines.push(``);
-    }
+
 
     // Info section
     if (poolInfo) {
