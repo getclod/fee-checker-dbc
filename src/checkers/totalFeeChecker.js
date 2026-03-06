@@ -174,26 +174,21 @@ async function getTotalFees(walletAddr, solUsd = 0) {
     let grandTotalAvailable = 0;
     let poolCount = 0;
 
-    // 2. Find pools for all configs in parallel (3 at a time)
+    // 2. Find pools for each config (1 at a time to avoid 429)
     const allPools = [];
-    for (let i = 0; i < configs.length; i += 3) {
-        const batch = configs.slice(i, i + 3);
-        const poolResults = await Promise.allSettled(
-            batch.map(c => findPoolsByConfig(connections, c))
-        );
-        for (let j = 0; j < batch.length; j++) {
-            const pools = poolResults[j].status === 'fulfilled' ? poolResults[j].value : [];
-            allPools.push({ config: batch[j], pools });
-        }
+    for (const c of configs) {
+        const pools = await findPoolsByConfig(connections, c);
+        allPools.push({ config: c, pools });
+        if (pools.length > 0) await new Promise(r => setTimeout(r, 300));
     }
 
-    // 3. Check fees for all pools (5 at a time)
+    // 3. Check fees (2 pools at a time, 500ms between batches)
     for (const { config: configAddr, pools } of allPools) {
         let configTotal = 0, configClaimed = 0, configAvailable = 0;
         const poolDetails = [];
 
-        for (let i = 0; i < pools.length; i += 5) {
-            const batch = pools.slice(i, i + 5);
+        for (let i = 0; i < pools.length; i += 2) {
+            const batch = pools.slice(i, i + 2);
             const feeResults = await Promise.allSettled(
                 batch.map(p => getClaimableFees(p.address, solUsd))
             );
@@ -215,6 +210,8 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                 });
                 poolCount++;
             }
+
+            if (i + 2 < pools.length) await new Promise(r => setTimeout(r, 500));
         }
 
         grandTotalLifetime += configTotal;
