@@ -95,7 +95,7 @@ function saveDiscoveredConfigs(discovered) {
 
 // ──── Step 1: Discover config addresses from wallet ──────────────────────────
 
-async function discoverConfigs(connections, walletAddr, seenSigs) {
+async function discoverConfigs(connections, walletAddr, seenSigs, isInitial = false) {
     const pk = new PublicKey(walletAddr);
     const key = `wallet:${walletAddr}`;
     if (!seenSigs[key]) seenSigs[key] = [];
@@ -103,14 +103,39 @@ async function discoverConfigs(connections, walletAddr, seenSigs) {
     const newConfigs = [];
 
     try {
-        // Fetch more transactions to find create_config among transfers/claims
-        const signatures = await tryRpc(connections, (conn) =>
-            conn.getSignaturesForAddress(pk, { limit: 100 })
-        );
+        // Initial scan: paginate through ALL history to find every config
+        // Regular poll: just check latest 20 for new activity
+        let allSignatures = [];
 
-        console.log(`[${ts()}] [WATCHER] Scanning ${signatures.length} txs for wallet ${walletAddr.slice(0, 8)}...`);
+        if (isInitial) {
+            // Deep scan — paginate through full history
+            let before = undefined;
+            let pageCount = 0;
+            while (pageCount < 10) { // Max 10 pages × 1000 = 10000 txs
+                const opts = { limit: 1000 };
+                if (before) opts.before = before;
 
-        for (const sig of signatures) {
+                const page = await tryRpc(connections, (conn) =>
+                    conn.getSignaturesForAddress(pk, opts)
+                );
+                if (!page || page.length === 0) break;
+
+                allSignatures = allSignatures.concat(page);
+                before = page[page.length - 1].signature;
+                pageCount++;
+
+                // If we got less than 1000, we've reached the end
+                if (page.length < 1000) break;
+            }
+            console.log(`[${ts()}] [WATCHER] Deep scan: ${allSignatures.length} txs for wallet ${walletAddr.slice(0, 8)}...`);
+        } else {
+            // Light poll — only check latest
+            allSignatures = await tryRpc(connections, (conn) =>
+                conn.getSignaturesForAddress(pk, { limit: 20 })
+            );
+        }
+
+        for (const sig of allSignatures) {
             if (seenSigs[key].includes(sig.signature)) continue;
 
             try {
@@ -311,7 +336,7 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
         for (const wallet of wallets) {
             try {
                 // Step 1: Discover new configs from this wallet
-                const newConfigs = await discoverConfigs(connections, wallet.address, seenSigs);
+                const newConfigs = await discoverConfigs(connections, wallet.address, seenSigs, isFirstRun);
                 if (!discovered[wallet.address]) discovered[wallet.address] = [];
 
                 for (const cfgAddr of newConfigs) {
