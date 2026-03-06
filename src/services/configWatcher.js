@@ -12,16 +12,14 @@ const SEEN_FILE = path.join(__dirname, '../../.seen_sigs.json');
 
 const POLL_INTERVAL = 30_000; // 30 seconds
 
-// Public RPCs that support getSignaturesForAddress
-const WATCHER_RPCS = [
-    'https://api.mainnet-beta.solana.com',
-    'https://solana-mainnet.g.alchemy.com/v2/demo',
-];
-
+// Use dedicated RPCs first, public as last fallback
 function createWatcherConnection() {
-    // Try public RPC first (supports getSignaturesForAddress)
     const settings = loadSettings();
-    const rpcs = [...WATCHER_RPCS, settings.RPC_URL];
+    // All RPC URLs from settings + public fallback
+    const rpcs = [
+        ...(settings.RPC_URLS || [settings.RPC_URL]),
+        'https://api.mainnet-beta.solana.com',
+    ];
     return rpcs.map(url => new Connection(url, {
         commitment: 'confirmed',
     }));
