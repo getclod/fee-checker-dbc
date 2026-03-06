@@ -79,8 +79,8 @@ async function discoverConfigs(connections, walletAddr, seenSigs, isInitial) {
     try {
         let allSigs = [];
         if (isInitial) {
-            // Scan last 500 txs — enough to find create_config
-            allSigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 500 }));
+            // Scan last 1000 txs
+            allSigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 1000 }));
             console.log(`[${ts()}] [WATCHER] Scan: ${allSigs.length} txs for wallet ${walletAddr.slice(0, 8)}...`);
         } else {
             allSigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 20 }));
@@ -134,6 +134,8 @@ function parsePoolCreation(tx) {
     if (!logsLower.includes('initializevirtualpool') && !logsLower.includes('initialize_virtual_pool') && !logsLower.includes('evtinitializepool')) return null;
 
     let creator = null, baseMint = null, pool = null, configUsed = null, tokenName = '', tokenSymbol = '';
+
+    // Parse from logs
     for (const log of logs) {
         const m1 = log.match(/"creator"\s*:\s*"([^"]+)"/); if (m1) creator = m1[1];
         const m2 = log.match(/"baseMint"\s*:\s*"([^"]+)"/); if (m2) baseMint = m2[1];
@@ -142,20 +144,62 @@ function parsePoolCreation(tx) {
         const m5 = log.match(/"name"\s*:\s*"([^"]+)"/); if (m5) tokenName = m5[1];
         const m6 = log.match(/"symbol"\s*:\s*"([^"]+)"/); if (m6) tokenSymbol = m6[1];
     }
+
+    // Parse from instruction accounts
     try {
-        const keys = (tx.transaction.message.accountKeys || []).map(k => (typeof k === 'string' ? k : (k.pubkey || k)).toString());
+        const accountKeys = tx.transaction.message.accountKeys || [];
+        const staticKeys = tx.transaction.message.staticAccountKeys || [];
+        const allKeys = (accountKeys.length > 0 ? accountKeys : staticKeys).map(k => (typeof k === 'string' ? k : (k.pubkey || k)).toString());
+        // Also add loaded addresses (for versioned txs)
+        if (tx.meta.loadedAddresses) {
+            if (tx.meta.loadedAddresses.writable) allKeys.push(...tx.meta.loadedAddresses.writable.map(k => k.toString()));
+            if (tx.meta.loadedAddresses.readonly) allKeys.push(...tx.meta.loadedAddresses.readonly.map(k => k.toString()));
+        }
+
         for (const ix of (tx.transaction.message.instructions || [])) {
-            if (keys[ix.programIdIndex] === DBC_PROGRAM) {
+            const pid = allKeys[ix.programIdIndex];
+            if (pid === DBC_PROGRAM) {
                 const a = ix.accounts || [];
                 if (a.length >= 6) {
-                    if (!configUsed) configUsed = keys[a[0]];
-                    if (!creator) creator = keys[a[2]];
-                    if (!baseMint) baseMint = keys[a[3]];
-                    if (!pool) pool = keys[a[5]];
+                    if (!configUsed) configUsed = allKeys[a[0]];
+                    if (!creator) creator = allKeys[a[2]];
+                    if (!baseMint) baseMint = allKeys[a[3]];
+                    if (!pool) pool = allKeys[a[5]];
+                }
+            }
+        }
+
+        // Parse token name/symbol from inner instructions (Metaplex createMetadataAccountV3)
+        const innerIxs = tx.meta.innerInstructions || [];
+        for (const inner of innerIxs) {
+            for (const iix of (inner.instructions || [])) {
+                // Metaplex metadata program
+                const pid = allKeys[iix.programIdIndex];
+                if (pid === 'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s' && iix.data) {
+                    try {
+                        const buf = Buffer.from(iix.data, 'base64');
+                        // createMetadataAccountV3 discriminator = 33
+                        if (buf.length > 10 && buf[0] === 33) {
+                            let offset = 1 + 4; // skip discriminator + name length prefix position
+                            // Read name length (4 bytes LE)
+                            const nameLen = buf.readUInt32LE(1);
+                            if (nameLen > 0 && nameLen < 200) {
+                                tokenName = buf.slice(offset, offset + nameLen).toString('utf8').replace(/\0/g, '').trim();
+                                offset += nameLen;
+                                // Read symbol length (4 bytes LE)
+                                const symLen = buf.readUInt32LE(offset);
+                                offset += 4;
+                                if (symLen > 0 && symLen < 50) {
+                                    tokenSymbol = buf.slice(offset, offset + symLen).toString('utf8').replace(/\0/g, '').trim();
+                                }
+                            }
+                        }
+                    } catch (_) { }
                 }
             }
         }
     } catch (_) { }
+
     if (!baseMint && !pool) return null;
     return { creator, baseMint, pool, configUsed, tokenName, tokenSymbol };
 }
@@ -225,9 +269,10 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                     const tx = await tryRpc(connections, c => c.getTransaction(sig, { maxSupportedTransactionVersion: 0 }));
                     const info = parsePoolCreation(tx);
                     if (info) {
-                        console.log(`[${ts()}] [WS] 🚀 ${ownerName} | ${info.tokenSymbol || '?'} | ${info.baseMint}`);
+                        info.signature = sig;
+                        console.log(`[${ts()}] [WS] 🚀 ${ownerName} | ${info.tokenName || '?'} ($${info.tokenSymbol || '?'}) | Mint: ${info.baseMint}`);
                         const html = formatDeployNotification(ownerName, info);
-                        onNewDeployment(ownerName, { signature: sig, ...info }, html);
+                        onNewDeployment(ownerName, info, html);
                     }
                     saveSeenSigs(seenSigs);
                 } catch (e) { console.error(`[${ts()}] [WS] Error: ${e.message}`); }
@@ -279,9 +324,10 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                         const tx = await tryRpc(connections, c => c.getTransaction(s.signature, { maxSupportedTransactionVersion: 0 }));
                         const info = parsePoolCreation(tx);
                         if (info) {
-                            console.log(`[${ts()}] [POLL] 🚀 ${item.name} | ${info.tokenSymbol || '?'} | ${info.baseMint}`);
+                            info.signature = s.signature;
+                            console.log(`[${ts()}] [POLL] 🚀 ${item.name} | ${info.tokenName || '?'} ($${info.tokenSymbol || '?'}) | Mint: ${info.baseMint}`);
                             const html = formatDeployNotification(item.name, info);
-                            onNewDeployment(item.name, { signature: s.signature, ...info }, html);
+                            onNewDeployment(item.name, info, html);
                         }
                     } catch (_) { }
                 }
