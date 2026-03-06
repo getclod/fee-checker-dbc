@@ -79,8 +79,8 @@ async function discoverConfigs(connections, walletAddr, seenSigs, isInitial) {
     try {
         let allSigs = [];
         if (isInitial) {
-            // Scan last 200 txs — enough to find create_config
-            allSigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 200 }));
+            // Scan last 500 txs — enough to find create_config
+            allSigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 500 }));
             console.log(`[${ts()}] [WATCHER] Scan: ${allSigs.length} txs for wallet ${walletAddr.slice(0, 8)}...`);
         } else {
             allSigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 20 }));
