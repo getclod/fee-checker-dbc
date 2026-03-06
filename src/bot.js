@@ -218,12 +218,12 @@ bot.onText(/\/fee(.*)/, async (msg, match) => {
 
 // ── /totalfee <config_creator_wallet> ─────────────────────────────────────────
 
-bot.onText(/\/totalfee(.*)/, async (msg, match) => {
+bot.onText(/\/totalfee/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const input = (match[1] || '').trim();
+    const fullText = (msg.text || '').replace(/\/totalfee/i, '').trim();
 
-    // Parse multiple wallets (space-separated)
-    const wallets = input.split(/[\s,]+/).filter(w => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(w));
+    // Parse multiple wallets (space, comma, or newline separated)
+    const wallets = fullText.split(/[\s,]+/).filter(w => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(w));
 
     if (wallets.length === 0) {
         // Try from reply
