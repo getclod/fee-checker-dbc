@@ -1,5 +1,5 @@
 // configWatcher.js — Monitor wallet owners → auto-discover configs → detect deploys
-// Flow: wallet create_config → config address → initialize_virtual_pool
+// Hybrid: WebSocket for instant detection + polling backup with RPC rotation
 
 const { Connection, PublicKey } = require('@solana/web3.js');
 const { loadSettings } = require('../config/settings');
@@ -10,8 +10,6 @@ const DBC_PROGRAM = 'dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN';
 const CONFIGS_FILE = path.join(__dirname, '../../configs.txt');
 const SEEN_FILE = path.join(__dirname, '../../.seen_sigs.json');
 const DISCOVERED_FILE = path.join(__dirname, '../../.discovered_configs.json');
-
-const POLL_INTERVAL = 10_000; // 10 seconds
 
 // ──── RPC ────────────────────────────────────────────────────────────────────
 
@@ -27,188 +25,123 @@ function createWatcherConnections() {
 async function tryRpc(connections, fn) {
     let lastErr;
     for (const conn of connections) {
-        try {
-            return await fn(conn);
-        } catch (e) {
+        try { return await fn(conn); } catch (e) {
             lastErr = e;
-            if (e.message && (e.message.includes('403') || e.message.includes('not allowed') || e.message.includes('429'))) {
-                continue;
-            }
+            if (e.message && (e.message.includes('403') || e.message.includes('not allowed') || e.message.includes('429'))) continue;
             throw e;
         }
     }
     throw lastErr || new Error('All RPCs failed');
 }
 
-function ts() {
-    return new Date().toISOString().replace('T', ' ').slice(0, 19);
-}
+function ts() { return new Date().toISOString().replace('T', ' ').slice(0, 19); }
 
-// ──── File parsing ───────────────────────────────────────────────────────────
+// ──── File I/O ───────────────────────────────────────────────────────────────
 
 function loadWatchedWallets() {
     if (!fs.existsSync(CONFIGS_FILE)) return [];
-    const lines = fs.readFileSync(CONFIGS_FILE, 'utf8').split('\n');
-    const entries = [];
-    for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) continue;
-        const [addr, ...nameParts] = trimmed.split(':');
-        const address = addr.trim();
-        const name = nameParts.join(':').trim() || 'Unknown';
-        if (address && address.length >= 32) {
-            entries.push({ address, name });
-        }
-    }
-    return entries;
+    return fs.readFileSync(CONFIGS_FILE, 'utf8').split('\n')
+        .map(l => l.trim()).filter(l => l && !l.startsWith('#'))
+        .map(l => { const [a, ...n] = l.split(':'); return { address: a.trim(), name: n.join(':').trim() || 'Unknown' }; })
+        .filter(e => e.address.length >= 32);
 }
 
 function loadSeenSigs() {
-    try {
-        if (fs.existsSync(SEEN_FILE)) return JSON.parse(fs.readFileSync(SEEN_FILE, 'utf8'));
-    } catch (_) { }
+    try { if (fs.existsSync(SEEN_FILE)) return JSON.parse(fs.readFileSync(SEEN_FILE, 'utf8')); } catch (_) { }
     return {};
 }
 
 function saveSeenSigs(seen) {
     try {
-        const trimmed = {};
-        for (const [key, sigs] of Object.entries(seen)) {
-            trimmed[key] = sigs.slice(-500);
-        }
-        fs.writeFileSync(SEEN_FILE, JSON.stringify(trimmed, null, 2));
+        const t = {};
+        for (const [k, s] of Object.entries(seen)) t[k] = s.slice(-500);
+        fs.writeFileSync(SEEN_FILE, JSON.stringify(t, null, 2));
     } catch (_) { }
 }
 
 function loadDiscoveredConfigs() {
-    try {
-        if (fs.existsSync(DISCOVERED_FILE)) return JSON.parse(fs.readFileSync(DISCOVERED_FILE, 'utf8'));
-    } catch (_) { }
+    try { if (fs.existsSync(DISCOVERED_FILE)) return JSON.parse(fs.readFileSync(DISCOVERED_FILE, 'utf8')); } catch (_) { }
     return {};
 }
 
-function saveDiscoveredConfigs(discovered) {
-    try {
-        fs.writeFileSync(DISCOVERED_FILE, JSON.stringify(discovered, null, 2));
-    } catch (_) { }
+function saveDiscoveredConfigs(d) {
+    try { fs.writeFileSync(DISCOVERED_FILE, JSON.stringify(d, null, 2)); } catch (_) { }
 }
 
-// ──── Step 1: Discover config addresses from wallet ──────────────────────────
+// ──── Wallet scan: discover configs ──────────────────────────────────────────
 
-async function discoverConfigs(connections, walletAddr, seenSigs, isInitial = false) {
+async function discoverConfigs(connections, walletAddr, seenSigs, isInitial) {
     const pk = new PublicKey(walletAddr);
     const key = `wallet:${walletAddr}`;
     if (!seenSigs[key]) seenSigs[key] = [];
-
     const newConfigs = [];
 
     try {
-        // Initial scan: paginate through ALL history to find every config
-        // Regular poll: just check latest 20 for new activity
-        let allSignatures = [];
-
+        let allSigs = [];
         if (isInitial) {
-            // Deep scan — paginate through full history
             let before = undefined;
-            let pageCount = 0;
-            while (pageCount < 10) { // Max 10 pages × 1000 = 10000 txs
+            for (let p = 0; p < 10; p++) {
                 const opts = { limit: 1000 };
                 if (before) opts.before = before;
-
-                const page = await tryRpc(connections, (conn) =>
-                    conn.getSignaturesForAddress(pk, opts)
-                );
+                const page = await tryRpc(connections, c => c.getSignaturesForAddress(pk, opts));
                 if (!page || page.length === 0) break;
-
-                allSignatures = allSignatures.concat(page);
+                allSigs = allSigs.concat(page);
                 before = page[page.length - 1].signature;
-                pageCount++;
-
-                // If we got less than 1000, we've reached the end
                 if (page.length < 1000) break;
             }
-            console.log(`[${ts()}] [WATCHER] Deep scan: ${allSignatures.length} txs for wallet ${walletAddr.slice(0, 8)}...`);
+            console.log(`[${ts()}] [WATCHER] Deep scan: ${allSigs.length} txs for wallet ${walletAddr.slice(0, 8)}...`);
         } else {
-            // Light poll — only check latest
-            allSignatures = await tryRpc(connections, (conn) =>
-                conn.getSignaturesForAddress(pk, { limit: 20 })
-            );
+            allSigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 20 }));
         }
 
-        for (const sig of allSignatures) {
+        for (const sig of allSigs) {
             if (seenSigs[key].includes(sig.signature)) continue;
-
             try {
-                const tx = await tryRpc(connections, (conn) =>
-                    conn.getTransaction(sig.signature, { maxSupportedTransactionVersion: 0 })
-                );
-
+                const tx = await tryRpc(connections, c => c.getTransaction(sig.signature, { maxSupportedTransactionVersion: 0 }));
                 if (tx && tx.meta && !tx.meta.err) {
                     const logs = tx.meta.logMessages || [];
-                    const logsJoined = logs.join(' ').toLowerCase();
-
-                    // Check for create_config in various formats
-                    const isCreateConfig = logsJoined.includes('create_config')
-                        || logsJoined.includes('createconfig')
-                        || logsJoined.includes('create_pool_config');
-
-                    // Also check if this tx interacts with DBC program and creates a new account
-                    let hasDBC = false;
-                    let dbcConfigAddr = null;
+                    const logsLower = logs.join(' ').toLowerCase();
+                    const isCreate = logsLower.includes('create_config') || logsLower.includes('createconfig');
+                    let hasDBC = false, dbcAddr = null;
 
                     try {
-                        const accountKeys = tx.transaction.message.accountKeys || [];
-                        const keys = accountKeys.map(k => typeof k === 'string' ? k : (k.pubkey || k).toString());
-
+                        const keys = (tx.transaction.message.accountKeys || []).map(k => (typeof k === 'string' ? k : (k.pubkey || k)).toString());
                         for (const ix of (tx.transaction.message.instructions || [])) {
-                            const programId = keys[ix.programIdIndex];
-                            if (programId === DBC_PROGRAM) {
+                            if (keys[ix.programIdIndex] === DBC_PROGRAM) {
                                 hasDBC = true;
-                                const accs = ix.accounts || [];
-                                if (accs.length >= 1) {
-                                    const candidateAddr = keys[accs[0]];
-                                    if (candidateAddr && candidateAddr !== walletAddr && candidateAddr !== DBC_PROGRAM) {
-                                        dbcConfigAddr = candidateAddr;
-                                    }
+                                const a = ix.accounts || [];
+                                if (a.length >= 1) {
+                                    const c = keys[a[0]];
+                                    if (c && c !== walletAddr && c !== DBC_PROGRAM) dbcAddr = c;
                                 }
                             }
                         }
                     } catch (_) { }
 
-                    // If it's a create_config OR it's a DBC tx that's NOT a pool init and NOT a claim
-                    const isPoolInit = logsJoined.includes('initialize_virtual_pool') || logsJoined.includes('evtinitializepool');
-                    const isClaim = logsJoined.includes('claim');
-
-                    if ((isCreateConfig || (hasDBC && !isPoolInit && !isClaim)) && dbcConfigAddr) {
-                        newConfigs.push(dbcConfigAddr);
-                        console.log(`[${ts()}] [WATCHER] 🔍 Discovered config: ${dbcConfigAddr}`);
+                    const isPool = logsLower.includes('initialize_virtual_pool');
+                    const isClaim = logsLower.includes('claim');
+                    if ((isCreate || (hasDBC && !isPool && !isClaim)) && dbcAddr) {
+                        newConfigs.push(dbcAddr);
                     }
                 }
             } catch (_) { }
-
             seenSigs[key].push(sig.signature);
         }
     } catch (e) {
-        console.error(`[${ts()}] [WATCHER] Error scanning wallet ${walletAddr.slice(0, 8)}...: ${e.message}`);
+        console.error(`[${ts()}] [WATCHER] Wallet scan error ${walletAddr.slice(0, 8)}: ${e.message}`);
     }
-
     return newConfigs;
 }
 
-// ──── Step 2: Check config address for new pool deploys ──────────────────────
+// ──── Pool creation parser ───────────────────────────────────────────────────
 
 function parsePoolCreation(tx) {
     if (!tx || !tx.meta || tx.meta.err) return null;
-
     const logs = tx.meta.logMessages || [];
-    const hasInitPool = logs.some(l =>
-        l.includes('initialize_virtual_pool') || l.includes('evtInitializePool')
-    );
-    if (!hasInitPool) return null;
+    const logsLower = logs.join(' ').toLowerCase();
+    if (!logsLower.includes('initialize_virtual_pool') && !logsLower.includes('evtinitializepool')) return null;
 
-    let creator = null, baseMint = null, pool = null, configUsed = null;
-    let tokenName = '', tokenSymbol = '';
-
+    let creator = null, baseMint = null, pool = null, configUsed = null, tokenName = '', tokenSymbol = '';
     for (const log of logs) {
         const m1 = log.match(/"creator"\s*:\s*"([^"]+)"/); if (m1) creator = m1[1];
         const m2 = log.match(/"baseMint"\s*:\s*"([^"]+)"/); if (m2) baseMint = m2[1];
@@ -217,104 +150,49 @@ function parsePoolCreation(tx) {
         const m5 = log.match(/"name"\s*:\s*"([^"]+)"/); if (m5) tokenName = m5[1];
         const m6 = log.match(/"symbol"\s*:\s*"([^"]+)"/); if (m6) tokenSymbol = m6[1];
     }
-
     try {
-        const accountKeys = tx.transaction.message.accountKeys || [];
-        const keys = accountKeys.map(k => typeof k === 'string' ? k : (k.pubkey || k).toString());
+        const keys = (tx.transaction.message.accountKeys || []).map(k => (typeof k === 'string' ? k : (k.pubkey || k)).toString());
         for (const ix of (tx.transaction.message.instructions || [])) {
-            const programId = keys[ix.programIdIndex];
-            if (programId === DBC_PROGRAM) {
-                const accs = ix.accounts || [];
-                if (accs.length >= 6) {
-                    if (!configUsed) configUsed = keys[accs[0]];
-                    if (!creator) creator = keys[accs[2]];
-                    if (!baseMint) baseMint = keys[accs[3]];
-                    if (!pool) pool = keys[accs[5]];
+            if (keys[ix.programIdIndex] === DBC_PROGRAM) {
+                const a = ix.accounts || [];
+                if (a.length >= 6) {
+                    if (!configUsed) configUsed = keys[a[0]];
+                    if (!creator) creator = keys[a[2]];
+                    if (!baseMint) baseMint = keys[a[3]];
+                    if (!pool) pool = keys[a[5]];
                 }
             }
         }
     } catch (_) { }
-
     if (!baseMint && !pool) return null;
     return { creator, baseMint, pool, configUsed, tokenName, tokenSymbol };
 }
 
-async function checkConfigForDeploys(connections, configAddr, seenSigs) {
-    const pk = new PublicKey(configAddr);
-    const key = `config:${configAddr}`;
-    if (!seenSigs[key]) seenSigs[key] = [];
+// ──── Notification format ────────────────────────────────────────────────────
 
-    const newDeploys = [];
-
-    try {
-        const signatures = await tryRpc(connections, (conn) =>
-            conn.getSignaturesForAddress(pk, { limit: 10 })
-        );
-
-        for (const sig of signatures) {
-            if (seenSigs[key].includes(sig.signature)) continue;
-
-            try {
-                const tx = await tryRpc(connections, (conn) =>
-                    conn.getTransaction(sig.signature, { maxSupportedTransactionVersion: 0 })
-                );
-                const result = parsePoolCreation(tx);
-                if (result) {
-                    newDeploys.push({ signature: sig.signature, ...result });
-                }
-            } catch (_) { }
-
-            seenSigs[key].push(sig.signature);
-        }
-    } catch (e) {
-        console.error(`[${ts()}] [WATCHER] Error checking config ${configAddr.slice(0, 8)}...: ${e.message}`);
-    }
-
-    return newDeploys;
-}
-
-// ──── Notification ───────────────────────────────────────────────────────────
-
-function shortAddr(addr) {
-    if (!addr || addr.length < 14) return addr || '?';
-    return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-}
+function shortAddr(a) { return (!a || a.length < 14) ? (a || '?') : `${a.slice(0, 6)}...${a.slice(-4)}`; }
 
 function formatDeployNotification(ownerName, info) {
-    const lines = [];
-    lines.push(`🚀 <b>New Token Deployed!</b>`);
-    lines.push(``);
-    lines.push(`👤 Owner: <b>${ownerName}</b>`);
-
-    if (info.tokenName || info.tokenSymbol) {
-        lines.push(`🪙 ${info.tokenName || '?'} ($${info.tokenSymbol || '?'})`);
-    }
-    if (info.baseMint) {
-        lines.push(`📦 Mint: <code>${info.baseMint}</code>`);
-    }
-    if (info.configUsed) {
-        lines.push(`⚙️ Config: <a href="https://solscan.io/account/${info.configUsed}">${shortAddr(info.configUsed)}</a>`);
-    }
-    if (info.creator) {
-        lines.push(`👑 Deployer: <a href="https://solscan.io/account/${info.creator}">${shortAddr(info.creator)}</a>`);
-    }
-    if (info.pool) {
-        lines.push(`🏊 Pool: <a href="https://solscan.io/account/${info.pool}">${shortAddr(info.pool)}</a>`);
-    }
-    lines.push(``);
-    lines.push(`🔗 <a href="https://solscan.io/tx/${info.signature}">View Transaction</a>`);
-
-    return lines.join('\n');
+    const L = [];
+    L.push(`🚀 <b>New Token Deployed!</b>`);
+    L.push(``);
+    L.push(`👤 Owner: <b>${ownerName}</b>`);
+    if (info.tokenName || info.tokenSymbol) L.push(`🪙 ${info.tokenName || '?'} ($${info.tokenSymbol || '?'})`);
+    if (info.baseMint) L.push(`📦 Mint: <code>${info.baseMint}</code>`);
+    if (info.configUsed) L.push(`⚙️ Config: <a href="https://solscan.io/account/${info.configUsed}">${shortAddr(info.configUsed)}</a>`);
+    if (info.creator) L.push(`👑 Deployer: <a href="https://solscan.io/account/${info.creator}">${shortAddr(info.creator)}</a>`);
+    if (info.pool) L.push(`🏊 Pool: <a href="https://solscan.io/account/${info.pool}">${shortAddr(info.pool)}</a>`);
+    L.push(``);
+    L.push(`🔗 <a href="https://solscan.io/tx/${info.signature}">View Transaction</a>`);
+    return L.join('\n');
 }
 
 function formatNewConfigNotification(ownerName, configAddr) {
     return [
-        `🔧 <b>New Config Created!</b>`,
-        ``,
+        `🔧 <b>New Config Created!</b>`, ``,
         `👤 Owner: <b>${ownerName}</b>`,
         `⚙️ Config: <a href="https://solscan.io/account/${configAddr}">${shortAddr(configAddr)}</a>`,
-        ``,
-        `Now monitoring this config for new deployments.`,
+        ``, `Now monitoring this config for new deployments.`,
     ].join('\n');
 }
 
@@ -327,152 +205,163 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
 
     console.log(`[${ts()}] [WATCHER] Config watcher starting...`);
 
-    // Track active WebSocket subscriptions
-    const activeSubscriptions = new Set();
+    // ── WebSocket (instant detection) ────────────────────────────────
     let wsConnection = null;
+    const activeWsSubs = new Set();
 
-    // Create WebSocket connection for real-time monitoring
-    function createWsConnection() {
-        const settings = loadSettings();
-        const rpcUrl = settings.RPC_URL || '';
-        const wsUrl = rpcUrl.replace('https://', 'wss://').replace('http://', 'ws://');
-        return new Connection(rpcUrl, {
-            commitment: 'confirmed',
-            wsEndpoint: wsUrl,
-        });
+    function subscribeWs(configAddr, ownerName) {
+        if (activeWsSubs.has(configAddr)) return;
+        try {
+            if (!wsConnection) {
+                const settings = loadSettings();
+                const rpcUrl = settings.RPC_URL || '';
+                const wsUrl = rpcUrl.replace('https://', 'wss://').replace('http://', 'ws://');
+                wsConnection = new Connection(rpcUrl, { commitment: 'confirmed', wsEndpoint: wsUrl });
+            }
+            wsConnection.onLogs(new PublicKey(configAddr), async (logs) => {
+                try {
+                    const ll = (logs.logs || []).join(' ').toLowerCase();
+                    if (!ll.includes('initialize_virtual_pool') && !ll.includes('evtinitializepool')) return;
+                    const sig = logs.signature;
+                    const sk = `config:${configAddr}`;
+                    if (!seenSigs[sk]) seenSigs[sk] = [];
+                    if (seenSigs[sk].includes(sig)) return;
+                    seenSigs[sk].push(sig);
+                    console.log(`[${ts()}] [WS] ⚡ Deploy! Config: ${configAddr.slice(0, 8)}...`);
+                    const tx = await tryRpc(connections, c => c.getTransaction(sig, { maxSupportedTransactionVersion: 0 }));
+                    const info = parsePoolCreation(tx);
+                    if (info) {
+                        console.log(`[${ts()}] [WS] 🚀 ${ownerName} | ${info.tokenSymbol || '?'} | ${info.baseMint}`);
+                        const html = formatDeployNotification(ownerName, info);
+                        onNewDeployment(ownerName, { signature: sig, ...info }, html);
+                    }
+                    saveSeenSigs(seenSigs);
+                } catch (e) { console.error(`[${ts()}] [WS] Error: ${e.message}`); }
+            }, 'confirmed');
+            activeWsSubs.add(configAddr);
+        } catch (e) {
+            console.error(`[${ts()}] [WS] Sub fail ${configAddr.slice(0, 8)}: ${e.message}`);
+        }
     }
 
-    // Subscribe to a config address for real-time deploy detection
-    function subscribeToConfig(configAddr, ownerName) {
-        if (activeSubscriptions.has(configAddr)) return;
+    // ── Polling backup (rotates RPCs, checks 3 configs per 5s) ───────
 
-        try {
-            if (!wsConnection) wsConnection = createWsConnection();
+    let pollIdx = 0;
+    const BATCH = 3;
+    const POLL_MS = 5000;
 
-            const configPk = new PublicKey(configAddr);
-            const subId = wsConnection.onLogs(configPk, async (logs, ctx) => {
-                try {
-                    const logsStr = (logs.logs || []).join(' ').toLowerCase();
-                    const hasPoolInit = logsStr.includes('initialize_virtual_pool')
-                        || logsStr.includes('evtinitializepool');
+    function getAllConfigEntries() {
+        const all = [];
+        const wallets = loadWatchedWallets();
+        for (const [wa, cfgs] of Object.entries(discovered)) {
+            const w = wallets.find(x => x.address === wa);
+            const name = w ? w.name : 'Unknown';
+            for (const c of cfgs) all.push({ addr: c, name });
+        }
+        return all;
+    }
 
-                    if (!hasPoolInit) return;
+    async function pollBatch() {
+        const all = getAllConfigEntries();
+        if (all.length === 0) return;
 
-                    const sig = logs.signature;
-                    const seenKey = `config:${configAddr}`;
-                    if (!seenSigs[seenKey]) seenSigs[seenKey] = [];
-                    if (seenSigs[seenKey].includes(sig)) return;
-                    seenSigs[seenKey].push(sig);
+        const batch = [];
+        for (let i = 0; i < BATCH; i++) {
+            if (pollIdx >= all.length) pollIdx = 0;
+            batch.push(all[pollIdx++]);
+        }
 
-                    console.log(`[${ts()}] [WS] ⚡ Deploy detected on ${configAddr.slice(0, 8)}! Sig: ${sig.slice(0, 16)}...`);
+        await Promise.all(batch.map(async (item, i) => {
+            const conn = connections[i % connections.length];
+            try {
+                const sigs = await conn.getSignaturesForAddress(new PublicKey(item.addr), { limit: 5 });
+                const sk = `config:${item.addr}`;
+                if (!seenSigs[sk]) seenSigs[sk] = [];
 
-                    // Fetch full transaction for details
+                for (const s of sigs) {
+                    if (seenSigs[sk].includes(s.signature)) continue;
+                    seenSigs[sk].push(s.signature);
                     try {
-                        const tx = await tryRpc(connections, (conn) =>
-                            conn.getTransaction(sig, { maxSupportedTransactionVersion: 0 })
-                        );
-
+                        const tx = await tryRpc(connections, c => c.getTransaction(s.signature, { maxSupportedTransactionVersion: 0 }));
                         const info = parsePoolCreation(tx);
                         if (info) {
-                            console.log(`[${ts()}] [WS] 🚀 ${ownerName} | ${info.tokenSymbol || '?'} | Mint: ${info.baseMint}`);
-                            const html = formatDeployNotification(ownerName, info);
-                            onNewDeployment(ownerName, { signature: sig, ...info }, html);
+                            console.log(`[${ts()}] [POLL] 🚀 ${item.name} | ${info.tokenSymbol || '?'} | ${info.baseMint}`);
+                            const html = formatDeployNotification(item.name, info);
+                            onNewDeployment(item.name, { signature: s.signature, ...info }, html);
                         }
-                    } catch (e) {
-                        console.error(`[${ts()}] [WS] Error fetching tx: ${e.message}`);
-                    }
-
-                    saveSeenSigs(seenSigs);
-                } catch (e) {
-                    console.error(`[${ts()}] [WS] Error processing log: ${e.message}`);
+                    } catch (_) { }
                 }
-            }, 'confirmed');
-
-            activeSubscriptions.add(configAddr);
-        } catch (e) {
-            console.error(`[${ts()}] [WS] Failed to subscribe ${configAddr.slice(0, 8)}: ${e.message}`);
-        }
+            } catch (_) { }
+        }));
+        saveSeenSigs(seenSigs);
     }
 
-    // Subscribe to all discovered configs
-    function subscribeAll() {
-        for (const [walletAddr, configs] of Object.entries(discovered)) {
-            const wallets = loadWatchedWallets();
-            const wallet = wallets.find(w => w.address === walletAddr);
-            const name = wallet ? wallet.name : 'Unknown';
+    // ── Wallet discovery (30s) ───────────────────────────────────────
 
-            for (const cfgAddr of configs) {
-                subscribeToConfig(cfgAddr, name);
-            }
-        }
-        console.log(`[${ts()}] [WS] Subscribed to ${activeSubscriptions.size} configs for real-time detection`);
-    }
-
-    // Polling: only for wallet config discovery (slower)
-    const WALLET_POLL = 30_000; // 30s for wallet scan
     let isFirstRun = true;
 
     async function pollWallets() {
         const wallets = loadWatchedWallets();
-        if (wallets.length === 0) return;
-
         for (const wallet of wallets) {
             try {
-                const newConfigs = await discoverConfigs(connections, wallet.address, seenSigs, isFirstRun);
+                const newCfgs = await discoverConfigs(connections, wallet.address, seenSigs, isFirstRun);
                 if (!discovered[wallet.address]) discovered[wallet.address] = [];
-
-                let addedNew = false;
-                for (const cfgAddr of newConfigs) {
-                    if (!discovered[wallet.address].includes(cfgAddr)) {
-                        discovered[wallet.address].push(cfgAddr);
-                        console.log(`[${ts()}] [WATCHER] ✅ Added config ${cfgAddr} for ${wallet.name}`);
-                        addedNew = true;
-
-                        // Immediately subscribe the new config to WebSocket
-                        subscribeToConfig(cfgAddr, wallet.name);
-
-                        if (!isFirstRun && onNewConfig) {
-                            const html = formatNewConfigNotification(wallet.name, cfgAddr);
-                            onNewConfig(wallet.name, cfgAddr, html);
-                        }
+                for (const c of newCfgs) {
+                    if (!discovered[wallet.address].includes(c)) {
+                        discovered[wallet.address].push(c);
+                        console.log(`[${ts()}] [WATCHER] ✅ Config ${c} → ${wallet.name}`);
+                        subscribeWs(c, wallet.name);
+                        if (!isFirstRun && onNewConfig) onNewConfig(wallet.name, c, formatNewConfigNotification(wallet.name, c));
                     }
                 }
-
-                // On first run, mark existing config sigs as seen (with delay to avoid 429)
                 if (isFirstRun) {
-                    const configsToWatch = discovered[wallet.address] || [];
-                    for (const cfgAddr of configsToWatch) {
-                        await checkConfigForDeploys(connections, cfgAddr, seenSigs);
-                        await new Promise(r => setTimeout(r, 500)); // 500ms delay per config
+                    for (const c of (discovered[wallet.address] || [])) {
+                        // Mark existing sigs as seen
+                        try {
+                            const sigs = await tryRpc(connections, cn => cn.getSignaturesForAddress(new PublicKey(c), { limit: 10 }));
+                            const sk = `config:${c}`;
+                            if (!seenSigs[sk]) seenSigs[sk] = [];
+                            for (const s of sigs) {
+                                if (!seenSigs[sk].includes(s.signature)) seenSigs[sk].push(s.signature);
+                            }
+                        } catch (_) { }
+                        await new Promise(r => setTimeout(r, 300));
                     }
                 }
             } catch (e) {
-                console.error(`[${ts()}] [WATCHER] Poll error for ${wallet.name}: ${e.message}`);
+                console.error(`[${ts()}] [WATCHER] Error ${wallet.name}: ${e.message}`);
             }
         }
-
         if (isFirstRun) {
-            const totalConfigs = Object.values(discovered).reduce((sum, arr) => sum + arr.length, 0);
-            console.log(`[${ts()}] [WATCHER] Discovered ${totalConfigs} configs across ${wallets.length} wallets`);
+            const total = Object.values(discovered).reduce((s, a) => s + a.length, 0);
+            console.log(`[${ts()}] [WATCHER] Discovered ${total} configs across ${wallets.length} wallets`);
         }
-
         isFirstRun = false;
         saveSeenSigs(seenSigs);
         saveDiscoveredConfigs(discovered);
     }
 
-    // Start: initial scan → subscribe → poll
+    // ── Boot ─────────────────────────────────────────────────────────
+
     pollWallets().then(() => {
         console.log(`[${ts()}] [WATCHER] Initial scan complete.`);
 
-        // Subscribe all discovered configs to WebSocket
-        subscribeAll();
+        // Subscribe WebSocket
+        const wallets = loadWatchedWallets();
+        for (const [wa, cfgs] of Object.entries(discovered)) {
+            const w = wallets.find(x => x.address === wa);
+            for (const c of cfgs) subscribeWs(c, w ? w.name : 'Unknown');
+        }
+        console.log(`[${ts()}] [WS] ${activeWsSubs.size} subscriptions`);
 
-        // Poll wallets for new configs every 30s
-        console.log(`[${ts()}] [WATCHER] Wallet poll every ${WALLET_POLL / 1000}s | Deploys via WebSocket ⚡`);
-        setInterval(pollWallets, WALLET_POLL);
+        // Start backup polling: 3 configs every 5s → full cycle ~62s for 37 configs
+        setInterval(pollBatch, POLL_MS);
+        console.log(`[${ts()}] [POLL] Backup: ${BATCH} configs / ${POLL_MS / 1000}s`);
+
+        // Wallet discovery every 30s
+        setInterval(pollWallets, 30000);
+        console.log(`[${ts()}] [WATCHER] Wallet poll every 30s`);
     });
 }
 
 module.exports = { startConfigWatcher, loadWatchedWallets };
-
