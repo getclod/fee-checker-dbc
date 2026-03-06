@@ -276,17 +276,28 @@ console.log(`[${ts()}] [BOOT] Bot is ready. Listening for commands...`);
 
 // ── Start Config Watcher ─────────────────────────────────────────────────────
 
-startConfigWatcher((ownerName, info, html) => {
-    // Send notification to all configured chat IDs
-    for (const chatId of NOTIFY_CHAT_IDS) {
-        sendHtml(bot, chatId, html, {
-            inline_keyboard: [[
-                { text: '🔍 Check Fee', callback_data: `refresh:${info.baseMint}` }
-            ]]
-        }).catch(e => {
-            console.error(`[${ts()}] [WATCHER] Failed to notify chat ${chatId}: ${e.message}`);
-        });
+startConfigWatcher(
+    // On new deployment
+    (ownerName, info, html) => {
+        for (const chatId of NOTIFY_CHAT_IDS) {
+            sendHtml(bot, chatId, html, {
+                inline_keyboard: [[
+                    { text: '🔍 Check Fee', callback_data: `refresh:${info.baseMint}` }
+                ]]
+            }).catch(e => {
+                console.error(`[${ts()}] [WATCHER] Failed to notify chat ${chatId}: ${e.message}`);
+            });
+        }
+    },
+    // On new config discovered
+    (ownerName, configAddr, html) => {
+        for (const chatId of NOTIFY_CHAT_IDS) {
+            sendHtml(bot, chatId, html).catch(e => {
+                console.error(`[${ts()}] [WATCHER] Failed to notify config ${chatId}: ${e.message}`);
+            });
+        }
     }
-});
+);
 
 console.log(`[${ts()}] [BOOT] Config watcher active. Monitoring configs.txt`);
+
