@@ -21,7 +21,7 @@ const BOT_TOKEN = '8744533288:AAHk9IYfsYcCzRul6j2-grn_l9bRxorWbz8';
 // Chat ID(s) to send deployment notifications to
 // Set this to your group chat ID or personal chat ID
 // To find your chat ID, send /chatid to the bot
-const NOTIFY_CHAT_IDS = [];
+const NOTIFY_CHAT_IDS = [-1003779556965];
 
 // ──── Logging ────────────────────────────────────────────────────────────────
 
