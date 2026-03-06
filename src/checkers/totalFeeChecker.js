@@ -100,21 +100,19 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                 const walletIndex = allKeys.indexOf(walletAddr);
                 if (walletIndex === -1) continue;
 
-                // Find pool address from DBC instruction (typically one of the first accounts)
-                let poolAddr = null;
+                // Collect all DBC instruction accounts (for pool identification)
+                const dbcAccounts = [];
                 for (const ix of (tx.transaction.message.instructions || [])) {
                     const pid = allKeys[ix.programIdIndex];
                     if (pid === DBC_PROGRAM) {
                         const a = ix.accounts || [];
-                        // Pool is usually in the first few accounts
-                        for (let ai = 0; ai < Math.min(a.length, 5); ai++) {
-                            const addr = allKeys[a[ai]];
-                            if (addr && addr !== walletAddr && addr !== DBC_PROGRAM) {
-                                poolAddr = addr;
-                                break;
+                        for (const ai of a) {
+                            const addr = allKeys[ai];
+                            if (addr && addr !== walletAddr && addr !== DBC_PROGRAM
+                                && !dbcAccounts.includes(addr)) {
+                                dbcAccounts.push(addr);
                             }
                         }
-                        break;
                     }
                 }
 
@@ -128,10 +126,12 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                     totals.SOL.earned += solGain;
                     claimCount++;
 
-                    if (poolAddr) {
-                        if (!poolEarnings[poolAddr]) poolEarnings[poolAddr] = { earned: 0, quoteLabel: 'SOL' };
-                        poolEarnings[poolAddr].earned += solGain;
-                        poolEarnings[poolAddr].quoteLabel = 'SOL';
+                    // Attribute to first DBC account as pool key
+                    for (const acc of dbcAccounts) {
+                        const key = `${acc}:SOL`;
+                        if (!poolEarnings[key]) poolEarnings[key] = { address: acc, earned: 0, quoteLabel: 'SOL' };
+                        poolEarnings[key].earned += solGain;
+                        break;
                     }
                 }
 
@@ -153,10 +153,11 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                             totals[label].earned += tokenGain;
                             claimCount++;
 
-                            if (poolAddr) {
-                                if (!poolEarnings[poolAddr]) poolEarnings[poolAddr] = { earned: 0, quoteLabel: label };
-                                poolEarnings[poolAddr].earned += tokenGain;
-                                poolEarnings[poolAddr].quoteLabel = label;
+                            for (const acc of dbcAccounts) {
+                                const key = `${acc}:${label}`;
+                                if (!poolEarnings[key]) poolEarnings[key] = { address: acc, earned: 0, quoteLabel: label };
+                                poolEarnings[key].earned += tokenGain;
+                                break;
                             }
                         }
                     }
@@ -171,9 +172,8 @@ async function getTotalFees(walletAddr, solUsd = 0) {
         await new Promise(r => setTimeout(r, 300));
     }
 
-    // Build top pools list
-    const topPools = Object.entries(poolEarnings)
-        .map(([addr, data]) => ({ address: addr, earned: data.earned, quoteLabel: data.quoteLabel }))
+    // Build top pools list (merge by address, keep currency separate)
+    const topPools = Object.values(poolEarnings)
         .sort((a, b) => {
             const aUsd = a.earned * (a.quoteLabel === 'SOL' ? solUsd : 1);
             const bUsd = b.earned * (b.quoteLabel === 'SOL' ? solUsd : 1);
