@@ -4,6 +4,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { getConfigFromMint } = require('./checkers/configChecker');
 const { getClaimableFees } = require('./checkers/feeChecker');
+const { getTotalFees } = require('./checkers/totalFeeChecker');
 const { findPoolByTokenMint, fetchTokenMetadata } = require('./services/poolScanner');
 const { getSolUsdPrice } = require('./services/priceService');
 const { startConfigWatcher } = require('./services/configWatcher');
@@ -195,6 +196,78 @@ bot.onText(/\/fee(.*)/, async (msg, match) => {
         return sendHtml(bot, chatId, result.html, result.refreshButton);
     } catch (e) {
         log('ERROR', '/fee', chatId, `Exception: ${e.message}`);
+        return sendHtml(bot, chatId, formatError('Error', e.message || 'Unexpected error'));
+    }
+});
+
+// ── /totalfee <config_creator_wallet> ─────────────────────────────────────────
+
+bot.onText(/\/totalfee(.*)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const wallet = getMintFromMessage(msg, match);
+
+    if (!wallet) {
+        log('WARN', '/totalfee', chatId, 'No wallet address');
+        return sendHtml(bot, chatId, formatError(
+            'Missing Address',
+            'Usage: /totalfee <config_creator_wallet>\nShows total fees earned across all configs & pools.',
+        ));
+    }
+
+    await sendHtml(bot, chatId, '⏳ Scanning all configs & pools... This may take a minute.');
+    await bot.sendChatAction(chatId, 'typing');
+
+    log('INFO', '/totalfee', chatId, `Scanning wallet: ${wallet}`);
+
+    try {
+        let solUsd = 0;
+        try { solUsd = await getSolUsdPrice(); } catch (_) { }
+
+        const result = await getTotalFees(wallet, solUsd);
+
+        if (result.error) {
+            return sendHtml(bot, chatId, formatError('No Configs', result.error));
+        }
+
+        // Format the result
+        const shortAddr = (a) => (!a || a.length < 14) ? (a || '?') : `${a.slice(0, 6)}...${a.slice(-4)}`;
+        const fmtNum = (n) => Number(n || 0).toFixed(6);
+        const fmtUsd = (n, price) => {
+            const val = Number(n || 0) * Number(price || 0);
+            return val >= 0.01 ? `($${val.toFixed(2)})` : '';
+        };
+
+        const L = [];
+        L.push(`💰 <b>Total Fee Report</b>`);
+        L.push(`👤 Wallet: <a href="https://solscan.io/account/${wallet}">${shortAddr(wallet)}</a>`);
+        L.push(`📊 ${result.configs.length} configs | ${result.poolCount} pools`);
+        L.push(``);
+
+        // Per-config breakdown (top 10)
+        const sorted = result.configs.filter(c => c.totalLifetime > 0).sort((a, b) => b.totalLifetime - a.totalLifetime);
+        const shown = sorted.slice(0, 10);
+        for (const cfg of shown) {
+            const label = cfg.pools.length > 0 ? cfg.pools[0].quoteLabel : 'SOL';
+            const price = label === 'SOL' ? solUsd : 1;
+            L.push(`⚙️ <a href="https://solscan.io/account/${cfg.config}">${shortAddr(cfg.config)}</a> — ${cfg.pools.length} pools`);
+            L.push(`   💎 Lifetime: ${fmtNum(cfg.totalLifetime)} ${label} ${fmtUsd(cfg.totalLifetime, price)}`);
+            L.push(`   ✅ Claimed: ${fmtNum(cfg.totalClaimed)} ${label}`);
+            L.push(`   🔓 Available: ${fmtNum(cfg.totalAvailable)} ${label}`);
+            L.push(``);
+        }
+        if (sorted.length > 10) L.push(`... and ${sorted.length - 10} more configs\n`);
+
+        // Grand total
+        L.push(`━━━━━━━━━━━━━━━━━━`);
+        L.push(`💎 <b>Total Lifetime: ${fmtNum(result.grandTotalLifetime)} SOL</b> ${fmtUsd(result.grandTotalLifetime, solUsd)}`);
+        L.push(`✅ <b>Total Claimed: ${fmtNum(result.grandTotalClaimed)} SOL</b> ${fmtUsd(result.grandTotalClaimed, solUsd)}`);
+        L.push(`🔓 <b>Total Available: ${fmtNum(result.grandTotalAvailable)} SOL</b> ${fmtUsd(result.grandTotalAvailable, solUsd)}`);
+
+        log('INFO', '/totalfee', chatId, `Done: ${result.configs.length} configs, ${result.poolCount} pools, lifetime=${result.grandTotalLifetime}`);
+
+        return sendHtml(bot, chatId, L.join('\n'));
+    } catch (e) {
+        log('ERROR', '/totalfee', chatId, `Exception: ${e.message}`);
         return sendHtml(bot, chatId, formatError('Error', e.message || 'Unexpected error'));
     }
 });
