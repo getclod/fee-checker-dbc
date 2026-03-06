@@ -289,13 +289,9 @@ startConfigWatcher(
             });
         }
     },
-    // On new config discovered
+    // On new config discovered (silent — only logs to console, no group notification)
     (ownerName, configAddr, html) => {
-        for (const chatId of NOTIFY_CHAT_IDS) {
-            sendHtml(bot, chatId, html).catch(e => {
-                console.error(`[${ts()}] [WATCHER] Failed to notify config ${chatId}: ${e.message}`);
-            });
-        }
+        console.log(`[${ts()}] [WATCHER] New config by ${ownerName}: ${configAddr}`);
     }
 );
 
