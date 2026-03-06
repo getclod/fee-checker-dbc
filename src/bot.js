@@ -318,15 +318,30 @@ bot.on('callback_query', async (query) => {
         }
 
         // Edit the existing message with fresh data
-        await bot.editMessageText(result.html, {
-            chat_id: chatId,
-            message_id: messageId,
-            parse_mode: 'HTML',
-            disable_web_page_preview: true,
-            reply_markup: result.refreshButton,
-        });
+        // Try editMessageText first, fallback to editMessageCaption (for photo messages)
+        try {
+            await bot.editMessageText(result.html, {
+                chat_id: chatId,
+                message_id: messageId,
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
+                reply_markup: result.refreshButton,
+            });
+        } catch (editErr) {
+            // Photo message → try editMessageCaption, else send new message
+            try {
+                await bot.editMessageCaption(result.html, {
+                    chat_id: chatId,
+                    message_id: messageId,
+                    parse_mode: 'HTML',
+                    reply_markup: result.refreshButton,
+                });
+            } catch (_) {
+                await sendHtml(bot, chatId, result.html, result.refreshButton);
+            }
+        }
     } catch (e) {
-        log('ERROR', 'refresh', chatId, `Exception: ${e.message}`);
+        log('ERROR', 'refresh', chatId, `Exception: ${(e.message || '').slice(0, 80)}`);
         try {
             await bot.answerCallbackQuery(query.id, { text: '❌ Refresh failed' });
         } catch (_) { }
