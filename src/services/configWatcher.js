@@ -228,10 +228,14 @@ async function fetchTokenMeta(mintAddr) {
             req.write(body);
             req.end();
         });
-        if (res.result && res.result.content && res.result.content.metadata) {
+        if (res.result && res.result.content) {
+            const meta = res.result.content.metadata || {};
+            const links = res.result.content.links || {};
+            const files = res.result.content.files || [];
             return {
-                name: res.result.content.metadata.name || '',
-                symbol: res.result.content.metadata.symbol || '',
+                name: meta.name || '',
+                symbol: meta.symbol || '',
+                image: links.image || (files.length > 0 ? files[0].uri : '') || '',
             };
         }
     } catch (_) { }
@@ -304,12 +308,13 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                     const info = parsePoolCreation(tx);
                     if (info) {
                         info.signature = sig;
-                        // Fetch token name if missing
-                        if ((!info.tokenName || !info.tokenSymbol) && info.baseMint) {
+                        // Fetch token metadata (name, symbol, image)
+                        if (info.baseMint) {
                             const meta = await fetchTokenMeta(info.baseMint);
                             if (meta) {
                                 if (!info.tokenName) info.tokenName = meta.name;
                                 if (!info.tokenSymbol) info.tokenSymbol = meta.symbol;
+                                if (meta.image) info.image = meta.image;
                             }
                         }
                         console.log(`[${ts()}] [WS] 🚀 ${ownerName} | ${info.tokenName || '?'} ($${info.tokenSymbol || '?'}) | Mint: ${info.baseMint}`);
@@ -367,11 +372,12 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                         const info = parsePoolCreation(tx);
                         if (info) {
                             info.signature = s.signature;
-                            if ((!info.tokenName || !info.tokenSymbol) && info.baseMint) {
+                            if (info.baseMint) {
                                 const meta = await fetchTokenMeta(info.baseMint);
                                 if (meta) {
                                     if (!info.tokenName) info.tokenName = meta.name;
                                     if (!info.tokenSymbol) info.tokenSymbol = meta.symbol;
+                                    if (meta.image) info.image = meta.image;
                                 }
                             }
                             console.log(`[${ts()}] [POLL] 🚀 ${item.name} | ${info.tokenName || '?'} ($${info.tokenSymbol || '?'}) | Mint: ${info.baseMint}`);

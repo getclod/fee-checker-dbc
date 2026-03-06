@@ -279,14 +279,31 @@ console.log(`[${ts()}] [BOOT] Bot is ready. Listening for commands...`);
 startConfigWatcher(
     // On new deployment
     (ownerName, info, html) => {
+        const replyMarkup = {
+            inline_keyboard: [[
+                { text: '🔍 Check Fee', callback_data: `refresh:${info.baseMint}` }
+            ]]
+        };
         for (const chatId of NOTIFY_CHAT_IDS) {
-            sendHtml(bot, chatId, html, {
-                inline_keyboard: [[
-                    { text: '🔍 Check Fee', callback_data: `refresh:${info.baseMint}` }
-                ]]
-            }).catch(e => {
-                console.error(`[${ts()}] [WATCHER] Failed to notify chat ${chatId}: ${e.message}`);
-            });
+            const sendNotif = async () => {
+                try {
+                    if (info.image) {
+                        // Send as photo with caption
+                        await bot.sendPhoto(chatId, info.image, {
+                            caption: html,
+                            parse_mode: 'HTML',
+                            reply_markup: replyMarkup,
+                        });
+                    } else {
+                        await sendHtml(bot, chatId, html, replyMarkup);
+                    }
+                } catch (e) {
+                    // Fallback to text if photo fails
+                    try { await sendHtml(bot, chatId, html, replyMarkup); } catch (_) { }
+                    console.error(`[${ts()}] [WATCHER] Notify error ${chatId}: ${e.message}`);
+                }
+            };
+            sendNotif();
         }
     },
     // On new config discovered (silent — only logs to console, no group notification)
