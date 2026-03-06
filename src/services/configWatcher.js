@@ -256,7 +256,7 @@ function formatDeployNotification(ownerName, info) {
     L.push(``);
     if (info.creator) L.push(`👑 Deployer: <a href="https://solscan.io/account/${info.creator}">${shortAddr(info.creator)}</a>`);
     if (info.configUsed) L.push(`⚙️ Config: <a href="https://solscan.io/account/${info.configUsed}">${shortAddr(info.configUsed)}</a>`);
-    if (info.creator) L.push(`🔑 Config Creator: <a href="https://solscan.io/account/${info.creator}">${shortAddr(info.creator)}</a>`);
+    if (info.configCreator) L.push(`🔑 Config Creator: <a href="https://solscan.io/account/${info.configCreator}">${shortAddr(info.configCreator)}</a>`);
     if (info.signature) L.push(`🔗 <a href="https://solscan.io/tx/${info.signature}">View Transaction</a>`);
     return L.join('\n');
 }
@@ -283,7 +283,7 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
     let wsConnection = null;
     const activeWsSubs = new Set();
 
-    function subscribeWs(configAddr, ownerName) {
+    function subscribeWs(configAddr, ownerName, walletAddr) {
         if (activeWsSubs.has(configAddr)) return;
         try {
             if (!wsConnection) {
@@ -308,6 +308,7 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                     const info = parsePoolCreation(tx);
                     if (info) {
                         info.signature = sig;
+                        info.configCreator = walletAddr;
                         // Wait for indexer then fetch token metadata
                         if (info.baseMint) {
                             await new Promise(r => setTimeout(r, 3000)); // Wait 3s for indexer
@@ -348,7 +349,7 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
         for (const [wa, cfgs] of Object.entries(discovered)) {
             const w = wallets.find(x => x.address === wa);
             const name = w ? w.name : 'Unknown';
-            for (const c of cfgs) all.push({ addr: c, name });
+            for (const c of cfgs) all.push({ addr: c, name, walletAddr: wa });
         }
         return all;
     }
@@ -378,6 +379,7 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                         const info = parsePoolCreation(tx);
                         if (info) {
                             info.signature = s.signature;
+                            info.configCreator = item.walletAddr;
                             if (info.baseMint) {
                                 await new Promise(r => setTimeout(r, 3000));
                                 let meta = await fetchTokenMeta(info.baseMint);
@@ -416,7 +418,7 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                     if (!discovered[wallet.address].includes(c)) {
                         discovered[wallet.address].push(c);
                         console.log(`[${ts()}] [WATCHER] ✅ Config ${c} → ${wallet.name}`);
-                        subscribeWs(c, wallet.name);
+                        subscribeWs(c, wallet.name, wallet.address);
                         if (!isFirstRun && onNewConfig) onNewConfig(wallet.name, c, formatNewConfigNotification(wallet.name, c));
                     }
                 }
@@ -456,7 +458,7 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
         const wallets = loadWatchedWallets();
         for (const [wa, cfgs] of Object.entries(discovered)) {
             const w = wallets.find(x => x.address === wa);
-            for (const c of cfgs) subscribeWs(c, w ? w.name : 'Unknown');
+            for (const c of cfgs) subscribeWs(c, w ? w.name : 'Unknown', wa);
         }
         console.log(`[${ts()}] [WS] ${activeWsSubs.size} subscriptions`);
 
