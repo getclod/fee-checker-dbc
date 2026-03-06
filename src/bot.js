@@ -116,6 +116,12 @@ async function checkFeeForMint(mint, chatId, source) {
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
+// Handle Telegram polling errors gracefully (ETIMEDOUT, EFATAL, etc)
+bot.on('polling_error', (err) => {
+    const msg = (err.message || '').slice(0, 80);
+    console.error(`[${ts()}] [ERROR] [polling] ${msg}`);
+});
+
 console.log(`[${ts()}] [BOOT] DBC Checker Bot starting...`);
 console.log(`[${ts()}] [BOOT] Polling for Telegram updates`);
 

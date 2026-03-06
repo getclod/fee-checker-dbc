@@ -31,8 +31,7 @@ async function tryRpc(connections, fn, retries = 2) {
             try { return await fn(conn); } catch (e) {
                 lastErr = e;
                 const msg = e.message || '';
-                if (msg.includes('429') || msg.includes('Too many')) {
-                    // Rate limited — wait and try next RPC
+                if (msg.includes('429') || msg.includes('Too many') || msg.includes('502') || msg.includes('503') || msg.includes('Bad gateway') || msg.includes('ETIMEDOUT') || msg.includes('ECONNRESET')) {
                     await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
                     continue;
                 }
@@ -43,6 +42,8 @@ async function tryRpc(connections, fn, retries = 2) {
     }
     throw lastErr || new Error('All RPCs failed');
 }
+
+function shortErr(e) { const m = (e.message || String(e)).replace(/<[^>]*>/g, '').slice(0, 80); return m; }
 
 function ts() { return new Date().toISOString().replace('T', ' ').slice(0, 19); }
 
@@ -130,7 +131,7 @@ async function discoverConfigs(connections, walletAddr, seenSigs, isInitial) {
             seenSigs[key].push(sig.signature);
         }
     } catch (e) {
-        console.error(`[${ts()}] [WATCHER] Wallet scan error ${walletAddr.slice(0, 8)}: ${e.message}`);
+        console.error(`[${ts()}] [WATCHER] Wallet scan error ${walletAddr.slice(0, 8)}: ${shortErr(e)}`);
     }
     return newConfigs;
 }
