@@ -208,56 +208,67 @@ async function getTotalFees(walletAddr, solUsd = 0) {
 
     // 2. Find pools (cached = instant, uncached = scan config txs)
     const allPools = [];
+    let hadUncached = false;
     for (const c of configs) {
+        const wasCached = !!poolCache[c];
         const pools = await findPoolsByConfig(connections, c, poolCache);
         allPools.push({ config: c, pools });
-        // Always delay between configs to avoid 429
-        await new Promise(r => setTimeout(r, 500));
+        if (!wasCached && pools.length > 0) {
+            hadUncached = true;
+            await new Promise(r => setTimeout(r, 500));
+        }
     }
-    savePoolCache(poolCache);
+    if (hadUncached) savePoolCache(poolCache);
 
-    // 3. Fresh fee check (2 pools at a time, 500ms between batches)
+    // 3. Flatten all pools → check 3 at a time, 300ms between
+    const configPoolMap = {};
+    const flatPools = [];
     for (const { config: configAddr, pools } of allPools) {
-        let configTotal = 0, configClaimed = 0, configAvailable = 0;
-        const poolDetails = [];
+        configPoolMap[configAddr] = { configTotal: 0, configClaimed: 0, configAvailable: 0, poolDetails: [] };
+        for (const p of pools) flatPools.push({ ...p, configAddr });
+    }
 
-        for (let i = 0; i < pools.length; i += 2) {
-            const batch = pools.slice(i, i + 2);
-            const feeResults = await Promise.allSettled(
-                batch.map(p => getClaimableFees(p.address, solUsd))
-            );
+    for (let i = 0; i < flatPools.length; i += 3) {
+        const batch = flatPools.slice(i, i + 3);
+        const feeResults = await Promise.allSettled(
+            batch.map(p => getClaimableFees(p.address, solUsd))
+        );
 
-            for (let j = 0; j < batch.length; j++) {
-                if (feeResults[j].status !== 'fulfilled') continue;
-                const fees = feeResults[j].value;
-                if (fees.error) continue;
-                configTotal += fees.totalLifetime || 0;
-                configClaimed += fees.totalClaimed || 0;
-                configAvailable += fees.totalAvailable || 0;
-                poolDetails.push({
-                    address: batch[j].address,
-                    baseMint: batch[j].baseMint,
-                    lifetime: fees.totalLifetime || 0,
-                    claimed: fees.totalClaimed || 0,
-                    available: fees.totalAvailable || 0,
-                    quoteLabel: fees.quoteLabel || 'SOL',
-                });
-                poolCount++;
-            }
-
-            if (i + 2 < pools.length) await new Promise(r => setTimeout(r, 500));
+        for (let j = 0; j < batch.length; j++) {
+            if (feeResults[j].status !== 'fulfilled') continue;
+            const fees = feeResults[j].value;
+            if (fees.error) continue;
+            const cm = configPoolMap[batch[j].configAddr];
+            cm.configTotal += fees.totalLifetime || 0;
+            cm.configClaimed += fees.totalClaimed || 0;
+            cm.configAvailable += fees.totalAvailable || 0;
+            cm.poolDetails.push({
+                address: batch[j].address,
+                baseMint: batch[j].baseMint,
+                lifetime: fees.totalLifetime || 0,
+                claimed: fees.totalClaimed || 0,
+                available: fees.totalAvailable || 0,
+                quoteLabel: fees.quoteLabel || 'SOL',
+            });
+            poolCount++;
         }
 
-        grandTotalLifetime += configTotal;
-        grandTotalClaimed += configClaimed;
-        grandTotalAvailable += configAvailable;
+        if (i + 3 < flatPools.length) await new Promise(r => setTimeout(r, 300));
+    }
+
+    // 4. Aggregate results
+    for (const { config: configAddr } of allPools) {
+        const cm = configPoolMap[configAddr];
+        grandTotalLifetime += cm.configTotal;
+        grandTotalClaimed += cm.configClaimed;
+        grandTotalAvailable += cm.configAvailable;
 
         results.push({
             config: configAddr,
-            pools: poolDetails,
-            totalLifetime: configTotal,
-            totalClaimed: configClaimed,
-            totalAvailable: configAvailable,
+            pools: cm.poolDetails,
+            totalLifetime: cm.configTotal,
+            totalClaimed: cm.configClaimed,
+            totalAvailable: cm.configAvailable,
         });
     }
 
