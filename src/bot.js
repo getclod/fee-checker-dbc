@@ -34,47 +34,76 @@ function isValidBase58(str) {
     return /^[1-9A-HJ-NP-Za-km-z]+$/.test(str);
 }
 
-/**
- * Extract a Solana address from text.
- * Looks for any base58 string that's 32-50 chars long.
- */
 function extractAddress(text) {
     if (!text) return null;
     const matches = text.match(/[1-9A-HJ-NP-Za-km-z]{32,50}/g);
     if (!matches) return null;
-    // Return the first valid-looking address
     for (const m of matches) {
         if (isValidBase58(m)) return m;
     }
     return null;
 }
 
-/**
- * Get mint address from command args OR from the replied-to message.
- * Supports: /fee <mint>  OR  reply to a message containing a CA with /fee
- */
 function getMintFromMessage(msg, match) {
-    // First try: argument after command
     const arg = (match[1] || '').trim();
     if (arg && isValidBase58(arg)) return arg;
-
-    // Second try: extract from replied message
     if (msg.reply_to_message) {
         const replyText = msg.reply_to_message.text || msg.reply_to_message.caption || '';
         const addr = extractAddress(replyText);
         if (addr) return addr;
     }
-
     return null;
 }
 
-async function sendHtml(bot, chatId, html) {
+async function sendHtml(bot, chatId, html, replyMarkup) {
     try {
-        await bot.sendMessage(chatId, html, { parse_mode: 'HTML', disable_web_page_preview: true });
+        return await bot.sendMessage(chatId, html, {
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+            reply_markup: replyMarkup || undefined,
+        });
     } catch (e) {
         const plain = html.replace(/<[^>]+>/g, '');
-        await bot.sendMessage(chatId, plain);
+        return await bot.sendMessage(chatId, plain);
     }
+}
+
+// ──── Shared fee check logic ─────────────────────────────────────────────────
+
+async function checkFeeForMint(mint, chatId, source) {
+    log('INFO', source, chatId, `Checking fees for: ${mint}`);
+
+    const poolInfo = await findPoolByTokenMint(mint);
+    if (!poolInfo || !poolInfo.address) return null;
+
+    log('INFO', source, chatId, `Pool: ${poolInfo.address}`);
+
+    let solUsd = 0;
+    try { solUsd = await getSolUsdPrice(); } catch (_) { solUsd = 0; }
+
+    const feeData = await getClaimableFees(poolInfo.address, solUsd);
+
+    let tokenMeta = { name: '', symbol: '' };
+    let configData = null;
+    try { tokenMeta = await fetchTokenMetadata(poolInfo.baseMint || mint); } catch (_) { }
+    try {
+        const configResult = await getConfigFromMint(mint);
+        if (configResult.success) configData = configResult.data;
+    } catch (_) { }
+
+    log('INFO', source, chatId,
+        `Fees: ${feeData.totalAvailable || 0} ${feeData.quoteLabel || 'SOL'}`);
+
+    const html = formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd, configData);
+
+    // Refresh button with mint encoded in callback data
+    const refreshButton = {
+        inline_keyboard: [[
+            { text: '🔄 Refresh', callback_data: `refresh:${mint}` }
+        ]]
+    };
+
+    return { html, refreshButton };
 }
 
 // ──── Bot Setup ──────────────────────────────────────────────────────────────
@@ -144,56 +173,28 @@ bot.onText(/\/fee(.*)/, async (msg, match) => {
         ));
     }
 
-    log('INFO', '/fee', chatId, `Checking fees for: ${mint}`);
     await bot.sendChatAction(chatId, 'typing');
 
     try {
-        // Find pool
-        const poolInfo = await findPoolByTokenMint(mint);
-
-        if (!poolInfo || !poolInfo.address) {
-            log('WARN', '/fee', chatId, 'Pool not found');
+        const result = await checkFeeForMint(mint, chatId, '/fee');
+        if (!result) {
             return sendHtml(bot, chatId, formatError('Pool Not Found', 'No DBC pool found for this mint.'));
         }
-
-        log('INFO', '/fee', chatId, `Pool: ${poolInfo.address}`);
-
-        // Get SOL price + fees + token metadata + config (parallel where possible)
-        let solUsd = 0;
-        try { solUsd = await getSolUsdPrice(); } catch (_) { solUsd = 0; }
-
-        const feeData = await getClaimableFees(poolInfo.address, solUsd);
-
-        let tokenMeta = { name: '', symbol: '' };
-        let configData = null;
-        try { tokenMeta = await fetchTokenMetadata(poolInfo.baseMint || mint); } catch (_) { }
-        try {
-            const configResult = await getConfigFromMint(mint);
-            if (configResult.success) configData = configResult.data;
-        } catch (_) { }
-
-        log('INFO', '/fee', chatId,
-            `Fees: ${feeData.quoteAmount || 0} ${feeData.quoteLabel || 'SOL'} | Ready: ${feeData.readyToClaim}`);
-
-        const html = formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd, configData);
-        return sendHtml(bot, chatId, html);
+        return sendHtml(bot, chatId, result.html, result.refreshButton);
     } catch (e) {
         log('ERROR', '/fee', chatId, `Exception: ${e.message}`);
         return sendHtml(bot, chatId, formatError('Error', e.message || 'Unexpected error'));
     }
 });
+
 // ── Auto-detect: bare CA paste → auto fee check ─────────────────────────────
 
 bot.on('message', async (msg) => {
     const text = (msg.text || '').trim();
-    // Skip commands, empty, or short messages
     if (!text || text.startsWith('/') || text.length < 32) return;
 
-    // Check if the message is a standalone Solana address
     const addr = extractAddress(text);
     if (!addr) return;
-
-    // Only trigger if the message is mostly just the address (allow small extra text)
     if (text.length > addr.length + 10) return;
 
     const chatId = msg.chat.id;
@@ -202,36 +203,49 @@ bot.on('message', async (msg) => {
     await bot.sendChatAction(chatId, 'typing');
 
     try {
-        const poolInfo = await findPoolByTokenMint(addr);
-        if (!poolInfo || !poolInfo.address) {
-            // Not a DBC pool, silently ignore
-            log('INFO', 'auto-fee', chatId, 'Not a DBC pool, skipping');
+        const result = await checkFeeForMint(addr, chatId, 'auto-fee');
+        if (!result) return; // Not a DBC pool, silently ignore
+        return sendHtml(bot, chatId, result.html, result.refreshButton);
+    } catch (e) {
+        log('ERROR', 'auto-fee', chatId, `Exception: ${e.message}`);
+    }
+});
+
+// ── Refresh button callback ─────────────────────────────────────────────────
+
+bot.on('callback_query', async (query) => {
+    const data = query.data || '';
+    if (!data.startsWith('refresh:')) return;
+
+    const mint = data.slice(8); // remove 'refresh:'
+    const chatId = query.message.chat.id;
+    const messageId = query.message.message_id;
+
+    log('INFO', 'refresh', chatId, `Refreshing fees for: ${mint}`);
+
+    // Acknowledge the button press
+    await bot.answerCallbackQuery(query.id, { text: '🔄 Refreshing...' });
+
+    try {
+        const result = await checkFeeForMint(mint, chatId, 'refresh');
+        if (!result) {
+            await bot.answerCallbackQuery(query.id, { text: '❌ Pool not found' });
             return;
         }
 
-        log('INFO', 'auto-fee', chatId, `Pool: ${poolInfo.address}`);
-
-        let solUsd = 0;
-        try { solUsd = await getSolUsdPrice(); } catch (_) { solUsd = 0; }
-
-        const feeData = await getClaimableFees(poolInfo.address, solUsd);
-
-        let tokenMeta = { name: '', symbol: '' };
-        let configData = null;
-        try { tokenMeta = await fetchTokenMetadata(poolInfo.baseMint || addr); } catch (_) { }
-        try {
-            const configResult = await getConfigFromMint(addr);
-            if (configResult.success) configData = configResult.data;
-        } catch (_) { }
-
-        log('INFO', 'auto-fee', chatId,
-            `Fees: ${feeData.totalAvailable || 0} ${feeData.quoteLabel || 'SOL'}`);
-
-        const html = formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd, configData);
-        return sendHtml(bot, chatId, html);
+        // Edit the existing message with fresh data
+        await bot.editMessageText(result.html, {
+            chat_id: chatId,
+            message_id: messageId,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+            reply_markup: result.refreshButton,
+        });
     } catch (e) {
-        log('ERROR', 'auto-fee', chatId, `Exception: ${e.message}`);
-        // Silently ignore errors for auto-detect
+        log('ERROR', 'refresh', chatId, `Exception: ${e.message}`);
+        try {
+            await bot.answerCallbackQuery(query.id, { text: '❌ Refresh failed' });
+        } catch (_) { }
     }
 });
 
