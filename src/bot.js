@@ -62,6 +62,22 @@ function getMintFromMessage(msg, match) {
     return null;
 }
 
+// Extract Config Creator address from a replied fee message
+function getCreatorFromReply(msg, match) {
+    const arg = (match[1] || '').trim();
+    if (arg && isValidBase58(arg)) return arg;
+    if (msg.reply_to_message) {
+        const replyText = msg.reply_to_message.text || msg.reply_to_message.caption || '';
+        // Look for "Config Creator:" line → extract address from solscan URL
+        const creatorMatch = replyText.match(/Config Creator[^\n]*solscan\.io\/account\/([1-9A-HJ-NP-Za-km-z]{32,50})/);
+        if (creatorMatch && isValidBase58(creatorMatch[1])) return creatorMatch[1];
+        // Fallback: look for any address
+        const addr = extractAddress(replyText);
+        if (addr) return addr;
+    }
+    return null;
+}
+
 async function sendHtml(bot, chatId, html, replyMarkup) {
     try {
         return await bot.sendMessage(chatId, html, {
@@ -204,7 +220,7 @@ bot.onText(/\/fee(.*)/, async (msg, match) => {
 
 bot.onText(/\/totalfee(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const wallet = getMintFromMessage(msg, match);
+    const wallet = getCreatorFromReply(msg, match);
 
     if (!wallet) {
         log('WARN', '/totalfee', chatId, 'No wallet address');
