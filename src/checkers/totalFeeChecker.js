@@ -288,12 +288,29 @@ async function getTotalFees(walletAddr, solUsd = 0) {
         }
     }
 
-    // 4. Aggregate results
+    // 4. Aggregate results — separate by currency
+    const totals = {}; // { SOL: { lifetime, claimed, available }, USD1: {...}, ... }
+
     for (const { config: configAddr } of allPools) {
         const cm = configPoolMap[configAddr];
-        grandTotalLifetime += cm.configTotal;
-        grandTotalClaimed += cm.configClaimed;
-        grandTotalAvailable += cm.configAvailable;
+
+        // Group pool fees by quoteLabel
+        const configTotals = {};
+        for (const p of cm.poolDetails) {
+            const lbl = p.quoteLabel || 'SOL';
+            if (!configTotals[lbl]) configTotals[lbl] = { lifetime: 0, claimed: 0, available: 0 };
+            configTotals[lbl].lifetime += p.lifetime;
+            configTotals[lbl].claimed += p.claimed;
+            configTotals[lbl].available += p.available;
+        }
+
+        // Add to grand totals
+        for (const [lbl, t] of Object.entries(configTotals)) {
+            if (!totals[lbl]) totals[lbl] = { lifetime: 0, claimed: 0, available: 0 };
+            totals[lbl].lifetime += t.lifetime;
+            totals[lbl].claimed += t.claimed;
+            totals[lbl].available += t.available;
+        }
 
         results.push({
             config: configAddr,
@@ -308,9 +325,7 @@ async function getTotalFees(walletAddr, solUsd = 0) {
         wallet: walletAddr,
         configs: results,
         poolCount,
-        grandTotalLifetime,
-        grandTotalClaimed,
-        grandTotalAvailable,
+        totals,
         solUsd,
     };
 }

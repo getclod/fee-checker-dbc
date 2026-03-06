@@ -258,18 +258,39 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
         L.push(`👤 Wallet: <a href="https://solscan.io/account/${wallet}">${shortAddr(wallet)}</a>`);
         L.push(`📊 ${result.configs.length} configs | ${result.poolCount} pools`);
         L.push(``);
-        L.push(`💎 <b>Total Lifetime: ${fmtNum(result.grandTotalLifetime)} SOL</b> ${fmtUsd(result.grandTotalLifetime, solUsd)}`);
-        L.push(`✅ <b>Total Claimed: ${fmtNum(result.grandTotalClaimed)} SOL</b> ${fmtUsd(result.grandTotalClaimed, solUsd)}`);
-        L.push(`🔓 <b>Total Available: ${fmtNum(result.grandTotalAvailable)} SOL</b> ${fmtUsd(result.grandTotalAvailable, solUsd)}`);
 
-        // Top 10 pools by lifetime fee
+        // Per-currency totals
+        let totalUsdValue = 0;
+        const currencyOrder = ['SOL', 'USD1', 'USDC'];
+        const currencies = Object.keys(result.totals).sort((a, b) => {
+            const ai = currencyOrder.indexOf(a);
+            const bi = currencyOrder.indexOf(b);
+            return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+        });
+
+        for (const lbl of currencies) {
+            const t = result.totals[lbl];
+            const price = lbl === 'SOL' ? solUsd : 1;
+            const usdVal = t.lifetime * price;
+            totalUsdValue += usdVal;
+            L.push(`<b>── ${lbl} ──</b>`);
+            L.push(`💎 Lifetime: ${fmtNum(t.lifetime)} ${lbl} ${fmtUsd(t.lifetime, price)}`);
+            L.push(`✅ Claimed: ${fmtNum(t.claimed)} ${lbl} ${fmtUsd(t.claimed, price)}`);
+            L.push(`🔓 Available: ${fmtNum(t.available)} ${lbl} ${fmtUsd(t.available, price)}`);
+            L.push(``);
+        }
+
+        L.push(`💵 <b>Total USD Value: $${totalUsdValue.toFixed(2)}</b>`);
+
+        // Top 10 pools by fee (convert to USD for sorting)
         const allPoolDetails = [];
         for (const cfg of result.configs) {
             for (const p of cfg.pools) {
-                allPoolDetails.push({ ...p, config: cfg.config });
+                const price = p.quoteLabel === 'SOL' ? solUsd : 1;
+                allPoolDetails.push({ ...p, usdValue: p.lifetime * price, config: cfg.config });
             }
         }
-        const top10 = allPoolDetails.sort((a, b) => b.lifetime - a.lifetime).slice(0, 10);
+        const top10 = allPoolDetails.sort((a, b) => b.usdValue - a.usdValue).slice(0, 10);
         if (top10.length > 0) {
             L.push(``);
             L.push(`🏆 <b>Top ${top10.length} Pools by Fee:</b>`);
@@ -280,7 +301,8 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
             }
         }
 
-        log('INFO', '/totalfee', chatId, `Done: ${result.configs.length} configs, ${result.poolCount} pools, lifetime=${result.grandTotalLifetime}`);
+        const logTotal = currencies.map(l => `${result.totals[l].lifetime.toFixed(2)} ${l}`).join(' + ');
+        log('INFO', '/totalfee', chatId, `Done: ${result.configs.length} configs, ${result.poolCount} pools, ${logTotal}`);
 
         return sendHtml(bot, chatId, L.join('\n'));
     } catch (e) {
