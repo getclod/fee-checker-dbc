@@ -324,9 +324,29 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
 
         L.push(`💵 <b>Total: $${totalUsdValue.toFixed(2)}</b>`);
 
-        // Top 10 pools with token names
+        // Top 10 tokens with grouped fee + migration
         if (topPools.length > 0) {
-            const mintsToFetch = topPools.map(p => p.baseMint).filter(Boolean);
+            // Group pools by baseMint
+            const tokenGroups = {};
+            for (const p of topPools) {
+                const mintKey = p.baseMint || p.address;
+                if (!tokenGroups[mintKey]) tokenGroups[mintKey] = { baseMint: p.baseMint, fee: 0, migration: 0, quoteLabel: p.quoteLabel };
+                if (p.isMigration) tokenGroups[mintKey].migration += p.earned;
+                else tokenGroups[mintKey].fee += p.earned;
+            }
+
+            // Sort by total USD value
+            const sortedTokens = Object.values(tokenGroups)
+                .map(t => ({ ...t, total: t.fee + t.migration }))
+                .sort((a, b) => {
+                    const aUsd = a.total * (a.quoteLabel === 'SOL' ? solUsd : 1);
+                    const bUsd = b.total * (b.quoteLabel === 'SOL' ? solUsd : 1);
+                    return bUsd - aUsd;
+                })
+                .slice(0, 10);
+
+            // Fetch token names
+            const mintsToFetch = sortedTokens.map(t => t.baseMint).filter(Boolean);
             const uniqueMints = [...new Set(mintsToFetch)];
             const metaMap = {};
             if (uniqueMints.length > 0) {
@@ -341,14 +361,18 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
             }
 
             L.push(``);
-            L.push(`🏆 <b>Top ${topPools.length} Pools:</b>`);
-            for (let i = 0; i < topPools.length; i++) {
-                const p = topPools[i];
-                const price = p.quoteLabel === 'SOL' ? solUsd : 1;
-                const meta = p.baseMint ? metaMap[p.baseMint] : null;
-                const label = (meta && meta.symbol) ? `$${meta.symbol}` : shortAddr(p.address);
-                const tag = p.isMigration ? ' 🔄' : '';
-                L.push(`${i + 1}. ${label}${tag} → ${fmtNum(p.earned)} ${p.quoteLabel} ${fmtUsd(p.earned, price)}`);
+            L.push(`🏆 <b>Top ${sortedTokens.length} Tokens:</b>`);
+            for (let i = 0; i < sortedTokens.length; i++) {
+                const t = sortedTokens[i];
+                const price = t.quoteLabel === 'SOL' ? solUsd : 1;
+                const meta = t.baseMint ? metaMap[t.baseMint] : null;
+                const label = (meta && meta.symbol) ? `$${meta.symbol}` : '???';
+                L.push(`${i + 1}. ${label} → ${fmtNum(t.total)} ${t.quoteLabel} ${fmtUsd(t.total, price)}`);
+                // Show breakdown if both fee + migration exist
+                const parts = [];
+                if (t.fee > 0.0005) parts.push(`Fee: ${fmtNum(t.fee)}`);
+                if (t.migration > 0.0005) parts.push(`Migration 🔄: ${fmtNum(t.migration)}`);
+                if (parts.length > 1) L.push(`   ${parts.join(' | ')}`);
             }
         }
 
