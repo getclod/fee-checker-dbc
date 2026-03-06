@@ -21,7 +21,7 @@ function createWatcherConnections() {
         ...(settings.RPC_URLS || [settings.RPC_URL]),
         'https://api.mainnet-beta.solana.com',
     ];
-    return rpcs.map(url => new Connection(url, { commitment: 'confirmed' }));
+    return rpcs.map(url => new Connection(url, { commitment: 'confirmed', disableRetryOnRateLimit: true }));
 }
 
 async function tryRpc(connections, fn, retries = 2) {

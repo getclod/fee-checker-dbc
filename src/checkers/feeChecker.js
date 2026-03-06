@@ -13,6 +13,7 @@ function createRpcConnection() {
     return new Connection(settings.RPC_URL, {
         commitment: 'confirmed',
         confirmTransactionInitialTimeout: 30000,
+        disableRetryOnRateLimit: true,
         httpHeaders: { Origin: settings.RPC_ORIGIN },
     });
 }

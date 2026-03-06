@@ -13,7 +13,7 @@ const DISCOVERED_FILE = path.join(__dirname, '../../.discovered_configs.json');
 function createConnections() {
     const settings = loadSettings();
     const rpcs = [settings.RPC_URL, ...(settings.RPC_URLS || [])].filter(Boolean);
-    return rpcs.map(url => new Connection(url, { commitment: 'confirmed' }));
+    return rpcs.map(url => new Connection(url, { commitment: 'confirmed', disableRetryOnRateLimit: true }));
 }
 
 async function tryRpc(connections, fn) {
