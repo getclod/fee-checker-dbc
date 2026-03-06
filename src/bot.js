@@ -258,23 +258,6 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
         L.push(`👤 Wallet: <a href="https://solscan.io/account/${wallet}">${shortAddr(wallet)}</a>`);
         L.push(`📊 ${result.configs.length} configs | ${result.poolCount} pools`);
         L.push(``);
-
-        // Per-config breakdown (top 10)
-        const sorted = result.configs.filter(c => c.totalLifetime > 0).sort((a, b) => b.totalLifetime - a.totalLifetime);
-        const shown = sorted.slice(0, 10);
-        for (const cfg of shown) {
-            const label = cfg.pools.length > 0 ? cfg.pools[0].quoteLabel : 'SOL';
-            const price = label === 'SOL' ? solUsd : 1;
-            L.push(`⚙️ <a href="https://solscan.io/account/${cfg.config}">${shortAddr(cfg.config)}</a> — ${cfg.pools.length} pools`);
-            L.push(`   💎 Lifetime: ${fmtNum(cfg.totalLifetime)} ${label} ${fmtUsd(cfg.totalLifetime, price)}`);
-            L.push(`   ✅ Claimed: ${fmtNum(cfg.totalClaimed)} ${label}`);
-            L.push(`   🔓 Available: ${fmtNum(cfg.totalAvailable)} ${label}`);
-            L.push(``);
-        }
-        if (sorted.length > 10) L.push(`... and ${sorted.length - 10} more configs\n`);
-
-        // Grand total
-        L.push(`━━━━━━━━━━━━━━━━━━`);
         L.push(`💎 <b>Total Lifetime: ${fmtNum(result.grandTotalLifetime)} SOL</b> ${fmtUsd(result.grandTotalLifetime, solUsd)}`);
         L.push(`✅ <b>Total Claimed: ${fmtNum(result.grandTotalClaimed)} SOL</b> ${fmtUsd(result.grandTotalClaimed, solUsd)}`);
         L.push(`🔓 <b>Total Available: ${fmtNum(result.grandTotalAvailable)} SOL</b> ${fmtUsd(result.grandTotalAvailable, solUsd)}`);
