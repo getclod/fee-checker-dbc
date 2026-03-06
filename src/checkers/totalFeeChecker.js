@@ -1,11 +1,14 @@
 // totalFeeChecker.js — Get total fees earned across all pools for a config creator wallet
-// Scans wallet → finds configs → finds pools per config → sums all fee metrics
+// Optimized: uses discovered_configs.json cache, parallel processing
 
 const { Connection, PublicKey } = require('@solana/web3.js');
 const { loadSettings } = require('../config/settings');
 const { getClaimableFees } = require('./feeChecker');
+const fs = require('fs');
+const path = require('path');
 
 const DBC_PROGRAM = 'dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN';
+const DISCOVERED_FILE = path.join(__dirname, '../../.discovered_configs.json');
 
 function createConnections() {
     const settings = loadSettings();
@@ -27,8 +30,22 @@ async function tryRpc(connections, fn) {
 }
 
 /**
- * Find all DBC config addresses created by a wallet.
- * Scans transaction history for create_config instructions.
+ * Get configs from discovered_configs.json cache (instant!) or fallback to tx scan.
+ */
+function getConfigsFromCache(walletAddr) {
+    try {
+        if (fs.existsSync(DISCOVERED_FILE)) {
+            const data = JSON.parse(fs.readFileSync(DISCOVERED_FILE, 'utf8'));
+            if (data[walletAddr] && data[walletAddr].length > 0) {
+                return data[walletAddr];
+            }
+        }
+    } catch (_) { }
+    return null;
+}
+
+/**
+ * Fallback: scan wallet txs to find configs (slow).
  */
 async function findConfigsByCreator(connections, walletAddr) {
     const pk = new PublicKey(walletAddr);
@@ -37,9 +54,8 @@ async function findConfigsByCreator(connections, walletAddr) {
     try {
         const sigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 1000 }));
 
-        // Check in batches
-        for (let i = 0; i < sigs.length; i += 5) {
-            const batch = sigs.slice(i, i + 5);
+        for (let i = 0; i < sigs.length; i += 10) {
+            const batch = sigs.slice(i, i + 10);
             const results = await Promise.allSettled(
                 batch.map(s => tryRpc(connections, c => c.getTransaction(s.signature, { maxSupportedTransactionVersion: 0 })))
             );
@@ -51,7 +67,6 @@ async function findConfigsByCreator(connections, walletAddr) {
                 const logs = (tx.meta.logMessages || []).join(' ').toLowerCase();
                 if (!logs.includes('createconfig') && !logs.includes('create_config')) continue;
 
-                // Extract config address from instruction accounts
                 try {
                     const accountKeys = tx.transaction.message.accountKeys || [];
                     const staticKeys = tx.transaction.message.staticAccountKeys || [];
@@ -67,20 +82,17 @@ async function findConfigsByCreator(connections, walletAddr) {
                             const a = ix.accounts || [];
                             if (a.length >= 2) {
                                 const configAddr = allKeys[a[0]];
-                                if (configAddr && !configs.includes(configAddr)) {
-                                    configs.push(configAddr);
-                                }
+                                if (configAddr && !configs.includes(configAddr)) configs.push(configAddr);
                             }
                         }
                     }
                 } catch (_) { }
             }
 
-            // Small delay between batches
-            if (i + 5 < sigs.length) await new Promise(r => setTimeout(r, 200));
+            if (i + 10 < sigs.length) await new Promise(r => setTimeout(r, 100));
         }
     } catch (e) {
-        console.error(`[totalFee] Error scanning wallet: ${(e.message || '').slice(0, 80)}`);
+        console.error(`[totalFee] Scan error: ${(e.message || '').slice(0, 80)}`);
     }
 
     return configs;
@@ -96,8 +108,8 @@ async function findPoolsByConfig(connections, configAddr) {
         const pk = new PublicKey(configAddr);
         const sigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 200 }));
 
-        for (let i = 0; i < sigs.length; i += 5) {
-            const batch = sigs.slice(i, i + 5);
+        for (let i = 0; i < sigs.length; i += 10) {
+            const batch = sigs.slice(i, i + 10);
             const results = await Promise.allSettled(
                 batch.map(s => tryRpc(connections, c => c.getTransaction(s.signature, { maxSupportedTransactionVersion: 0 })))
             );
@@ -134,23 +146,26 @@ async function findPoolsByConfig(connections, configAddr) {
                 } catch (_) { }
             }
 
-            if (i + 5 < sigs.length) await new Promise(r => setTimeout(r, 200));
+            if (i + 10 < sigs.length) await new Promise(r => setTimeout(r, 100));
         }
     } catch (e) {
-        console.error(`[totalFee] Error finding pools for ${configAddr.slice(0, 8)}: ${(e.message || '').slice(0, 80)}`);
+        console.error(`[totalFee] Pools error ${configAddr.slice(0, 8)}: ${(e.message || '').slice(0, 80)}`);
     }
     return pools;
 }
 
 /**
  * Get total fees for a config creator wallet.
- * Returns per-config breakdown + grand total.
+ * Uses cache for instant config lookup, parallel pool scanning.
  */
 async function getTotalFees(walletAddr, solUsd = 0) {
     const connections = createConnections();
 
-    // 1. Find all configs
-    const configs = await findConfigsByCreator(connections, walletAddr);
+    // 1. Try cache first (instant), fallback to tx scan
+    let configs = getConfigsFromCache(walletAddr);
+    if (!configs) {
+        configs = await findConfigsByCreator(connections, walletAddr);
+    }
     if (configs.length === 0) return { configs: [], grandTotal: 0, error: 'No configs found for this wallet' };
 
     const results = [];
@@ -159,35 +174,47 @@ async function getTotalFees(walletAddr, solUsd = 0) {
     let grandTotalAvailable = 0;
     let poolCount = 0;
 
-    // 2. For each config, find pools and check fees
-    for (const configAddr of configs) {
-        const pools = await findPoolsByConfig(connections, configAddr);
-        let configTotal = 0;
-        let configClaimed = 0;
-        let configAvailable = 0;
+    // 2. Find pools for all configs in parallel (3 at a time)
+    const allPools = [];
+    for (let i = 0; i < configs.length; i += 3) {
+        const batch = configs.slice(i, i + 3);
+        const poolResults = await Promise.allSettled(
+            batch.map(c => findPoolsByConfig(connections, c))
+        );
+        for (let j = 0; j < batch.length; j++) {
+            const pools = poolResults[j].status === 'fulfilled' ? poolResults[j].value : [];
+            allPools.push({ config: batch[j], pools });
+        }
+    }
+
+    // 3. Check fees for all pools (5 at a time)
+    for (const { config: configAddr, pools } of allPools) {
+        let configTotal = 0, configClaimed = 0, configAvailable = 0;
         const poolDetails = [];
 
-        for (const pool of pools) {
-            try {
-                const fees = await getClaimableFees(pool.address, solUsd);
-                if (!fees.error) {
-                    configTotal += fees.totalLifetime || 0;
-                    configClaimed += fees.totalClaimed || 0;
-                    configAvailable += fees.totalAvailable || 0;
-                    poolDetails.push({
-                        address: pool.address,
-                        baseMint: pool.baseMint,
-                        lifetime: fees.totalLifetime || 0,
-                        claimed: fees.totalClaimed || 0,
-                        available: fees.totalAvailable || 0,
-                        quoteLabel: fees.quoteLabel || 'SOL',
-                    });
-                    poolCount++;
-                }
-            } catch (_) { }
+        for (let i = 0; i < pools.length; i += 5) {
+            const batch = pools.slice(i, i + 5);
+            const feeResults = await Promise.allSettled(
+                batch.map(p => getClaimableFees(p.address, solUsd))
+            );
 
-            // Rate limit protection
-            await new Promise(r => setTimeout(r, 300));
+            for (let j = 0; j < batch.length; j++) {
+                if (feeResults[j].status !== 'fulfilled') continue;
+                const fees = feeResults[j].value;
+                if (fees.error) continue;
+                configTotal += fees.totalLifetime || 0;
+                configClaimed += fees.totalClaimed || 0;
+                configAvailable += fees.totalAvailable || 0;
+                poolDetails.push({
+                    address: batch[j].address,
+                    baseMint: batch[j].baseMint,
+                    lifetime: fees.totalLifetime || 0,
+                    claimed: fees.totalClaimed || 0,
+                    available: fees.totalAvailable || 0,
+                    quoteLabel: fees.quoteLabel || 'SOL',
+                });
+                poolCount++;
+            }
         }
 
         grandTotalLifetime += configTotal;
