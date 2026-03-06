@@ -31,6 +31,7 @@ function loadSettings() {
         RPC_URLS: rpcUrls,
         RPC_ORIGIN: normalizeUrl(raw.RPC_ORIGIN || process.env.RPC_ORIGIN, 'http://localhost'),
         JUPITER_API_KEY: String(raw.JUPITER_API_KEY || '').trim(),
+        HELIUS_WS_URL: String(raw.HELIUS_WS_URL || '').trim(),
     };
 }
 

@@ -215,9 +215,9 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
             if (!wsConnection) {
                 const settings = loadSettings();
                 const rpcUrl = settings.RPC_URL || '';
-                // Helius dedicated: just swap https→wss
-                const wsUrl = rpcUrl.replace('https://', 'wss://').replace('http://', 'ws://');
-                console.log(`[${ts()}] [WS] Connecting to ${wsUrl.slice(0, 40)}...`);
+                // Use dedicated WS URL if available, otherwise convert RPC URL
+                const wsUrl = settings.HELIUS_WS_URL || rpcUrl.replace('https://', 'wss://').replace('http://', 'ws://');
+                console.log(`[${ts()}] [WS] Connecting to ${wsUrl.slice(0, 50)}...`);
                 wsConnection = new Connection(rpcUrl, { commitment: 'confirmed', wsEndpoint: wsUrl });
 
                 // Test: subscribe to DBC program to verify WS works
