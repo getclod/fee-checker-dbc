@@ -46,10 +46,8 @@ function ts() {
 // ──── Config file parsing ────────────────────────────────────────────────────
 
 /**
- * Load watched entries from configs.txt
- * Format: type:address:NAME
- *   type = config | wallet
- * Legacy format (no type): address:NAME → treated as config
+ * Load watched wallets from configs.txt
+ * Format: walletAddress:NAME (one per line)
  */
 function loadWatchedConfigs() {
     if (!fs.existsSync(CONFIGS_FILE)) return [];
@@ -60,22 +58,11 @@ function loadWatchedConfigs() {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
 
-        const parts = trimmed.split(':');
-
-        if (parts.length >= 3 && (parts[0] === 'config' || parts[0] === 'wallet')) {
-            // New format: type:address:NAME
-            entries.push({
-                type: parts[0],
-                address: parts[1].trim(),
-                name: parts.slice(2).join(':').trim() || 'Unknown',
-            });
-        } else if (parts.length >= 2) {
-            // Legacy format: address:NAME → config
-            entries.push({
-                type: 'config',
-                address: parts[0].trim(),
-                name: parts.slice(1).join(':').trim() || 'Unknown',
-            });
+        const [addr, ...nameParts] = trimmed.split(':');
+        const address = addr.trim();
+        const name = nameParts.join(':').trim() || 'Unknown';
+        if (address && address.length >= 32) {
+            entries.push({ address, name });
         }
     }
     return entries;
@@ -172,7 +159,7 @@ function parsePoolCreation(tx) {
 
 async function checkForNewPools(connections, entry, seenSigs) {
     const pk = new PublicKey(entry.address);
-    const key = `${entry.type}:${entry.address}`;
+    const key = entry.address;
 
     if (!seenSigs[key]) seenSigs[key] = [];
 
@@ -202,7 +189,7 @@ async function checkForNewPools(connections, entry, seenSigs) {
 
         return newDeployments;
     } catch (e) {
-        console.error(`[${ts()}] [WATCHER] Error checking ${entry.type}:${entry.address.slice(0, 8)}...: ${e.message}`);
+        console.error(`[${ts()}] [WATCHER] Error checking ${entry.address.slice(0, 8)}...: ${e.message}`);
         return [];
     }
 }
@@ -214,11 +201,11 @@ function shortAddr(addr) {
     return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
 
-function formatDeployNotification(ownerName, info, watchType) {
+function formatDeployNotification(ownerName, info) {
     const lines = [];
     lines.push(`🚀 <b>New Token Deployed!</b>`);
     lines.push(``);
-    lines.push(`👤 ${watchType === 'wallet' ? 'Deployer' : 'Config'}: <b>${ownerName}</b>`);
+    lines.push(`👤 Deployer: <b>${ownerName}</b>`);
 
     if (info.tokenName || info.tokenSymbol) {
         lines.push(`🪙 ${info.tokenName || '?'} ($${info.tokenSymbol || '?'})`);
@@ -267,7 +254,7 @@ function startConfigWatcher(onNewDeployment) {
                 if (!isFirstRun && newDeployments.length > 0) {
                     for (const info of newDeployments) {
                         console.log(`[${ts()}] [WATCHER] 🚀 New deploy! ${entry.name} | ${info.tokenSymbol || '?'} | Mint: ${info.baseMint}`);
-                        const html = formatDeployNotification(entry.name, info, entry.type);
+                        const html = formatDeployNotification(entry.name, info);
                         onNewDeployment(entry.name, info, html);
                     }
                 } else if (isFirstRun && newDeployments.length > 0) {
