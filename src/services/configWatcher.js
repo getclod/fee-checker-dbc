@@ -118,7 +118,7 @@ async function discoverConfigs(connections, walletAddr, seenSigs, isInitial) {
                         }
                     } catch (_) { }
 
-                    const isPool = logsLower.includes('initialize_virtual_pool');
+                    const isPool = logsLower.includes('initializevirtualpool') || logsLower.includes('initialize_virtual_pool');
                     const isClaim = logsLower.includes('claim');
                     if ((isCreate || (hasDBC && !isPool && !isClaim)) && dbcAddr) {
                         newConfigs.push(dbcAddr);
@@ -139,7 +139,7 @@ function parsePoolCreation(tx) {
     if (!tx || !tx.meta || tx.meta.err) return null;
     const logs = tx.meta.logMessages || [];
     const logsLower = logs.join(' ').toLowerCase();
-    if (!logsLower.includes('initialize_virtual_pool') && !logsLower.includes('evtinitializepool')) return null;
+    if (!logsLower.includes('initializevirtualpool') && !logsLower.includes('initialize_virtual_pool') && !logsLower.includes('evtinitializepool')) return null;
 
     let creator = null, baseMint = null, pool = null, configUsed = null, tokenName = '', tokenSymbol = '';
     for (const log of logs) {
@@ -223,7 +223,7 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
             wsConnection.onLogs(new PublicKey(configAddr), async (logs) => {
                 try {
                     const ll = (logs.logs || []).join(' ').toLowerCase();
-                    if (!ll.includes('initialize_virtual_pool') && !ll.includes('evtinitializepool')) return;
+                    if (!ll.includes('initializevirtualpool') && !ll.includes('initialize_virtual_pool') && !ll.includes('evtinitializepool')) return;
                     const sig = logs.signature;
                     const sk = `config:${configAddr}`;
                     if (!seenSigs[sk]) seenSigs[sk] = [];
