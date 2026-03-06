@@ -121,6 +121,18 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                     }
                 }
 
+                // Find base token mint (not SOL/WSOL/USD1/USDC)
+                const WSOL = 'So11111111111111111111111111111111111111112';
+                const skipMints = [USD1_MINT, USDC_MINT, WSOL];
+                let baseMint = null;
+                const allTokenBals = [...(tx.meta.preTokenBalances || []), ...(tx.meta.postTokenBalances || [])];
+                for (const tb of allTokenBals) {
+                    if (tb.mint && !skipMints.includes(tb.mint)) {
+                        baseMint = tb.mint;
+                        break;
+                    }
+                }
+
                 if (solGain > 0.0005) {
                     if (!totals.SOL) totals.SOL = { earned: 0 };
                     totals.SOL.earned += solGain;
@@ -128,8 +140,9 @@ async function getTotalFees(walletAddr, solUsd = 0) {
 
                     if (sourceAddr) {
                         const key = `${sourceAddr}:SOL`;
-                        if (!poolEarnings[key]) poolEarnings[key] = { address: sourceAddr, earned: 0, quoteLabel: 'SOL' };
+                        if (!poolEarnings[key]) poolEarnings[key] = { address: sourceAddr, earned: 0, quoteLabel: 'SOL', baseMint: null };
                         poolEarnings[key].earned += solGain;
+                        if (baseMint) poolEarnings[key].baseMint = baseMint;
                     }
                 }
 
@@ -165,8 +178,9 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                             }
                             if (tokenSource) {
                                 const key = `${tokenSource}:${label}`;
-                                if (!poolEarnings[key]) poolEarnings[key] = { address: tokenSource, earned: 0, quoteLabel: label };
+                                if (!poolEarnings[key]) poolEarnings[key] = { address: tokenSource, earned: 0, quoteLabel: label, baseMint: null };
                                 poolEarnings[key].earned += tokenGain;
+                                if (baseMint) poolEarnings[key].baseMint = baseMint;
                             }
                         }
                     }

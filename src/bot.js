@@ -274,14 +274,31 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
 
         L.push(`💵 <b>Total: $${totalUsdValue.toFixed(2)}</b>`);
 
-        // Top 10 pools
+        // Top 10 pools with token names
         if (result.topPools.length > 0) {
+            // Fetch token names for pools that have baseMint
+            const mintsToFetch = result.topPools.map(p => p.baseMint).filter(Boolean);
+            const uniqueMints = [...new Set(mintsToFetch)];
+            const metaMap = {};
+            if (uniqueMints.length > 0) {
+                const metaResults = await Promise.allSettled(
+                    uniqueMints.map(m => fetchTokenMetadata(m))
+                );
+                for (let i = 0; i < uniqueMints.length; i++) {
+                    if (metaResults[i].status === 'fulfilled' && metaResults[i].value) {
+                        metaMap[uniqueMints[i]] = metaResults[i].value;
+                    }
+                }
+            }
+
             L.push(``);
             L.push(`🏆 <b>Top ${result.topPools.length} Pools:</b>`);
             for (let i = 0; i < result.topPools.length; i++) {
                 const p = result.topPools[i];
                 const price = p.quoteLabel === 'SOL' ? solUsd : 1;
-                L.push(`${i + 1}. <a href="https://solscan.io/account/${p.address}">${shortAddr(p.address)}</a> → ${fmtNum(p.earned)} ${p.quoteLabel} ${fmtUsd(p.earned, price)}`);
+                const meta = p.baseMint ? metaMap[p.baseMint] : null;
+                const label = (meta && meta.symbol) ? `$${meta.symbol}` : shortAddr(p.address);
+                L.push(`${i + 1}. ${label} → ${fmtNum(p.earned)} ${p.quoteLabel} ${fmtUsd(p.earned, price)}`);
             }
         }
 
