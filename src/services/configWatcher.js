@@ -335,9 +335,8 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
     function createWsConnection() {
         const settings = loadSettings();
         const rpcUrl = settings.RPC_URL || '';
-        // Convert https:// to wss:// for WebSocket
         const wsUrl = rpcUrl.replace('https://', 'wss://').replace('http://', 'ws://');
-        return new Connection(wsUrl, {
+        return new Connection(rpcUrl, {
             commitment: 'confirmed',
             wsEndpoint: wsUrl,
         });
