@@ -292,12 +292,18 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
         }
         const top10 = allPoolDetails.sort((a, b) => b.usdValue - a.usdValue).slice(0, 10);
         if (top10.length > 0) {
+            // Fetch token names for top 10
+            const metaResults = await Promise.allSettled(
+                top10.map(p => fetchTokenMetadata(p.baseMint))
+            );
+
             L.push(``);
             L.push(`🏆 <b>Top ${top10.length} Pools by Fee:</b>`);
             for (let i = 0; i < top10.length; i++) {
                 const p = top10[i];
-                L.push(`${i + 1}. <a href="https://solscan.io/account/${p.address}">${shortAddr(p.address)}</a> → ${fmtNum(p.lifetime)} ${p.quoteLabel} ${fmtUsd(p.lifetime, p.quoteLabel === 'SOL' ? solUsd : 1)}`);
-                L.push(`   Mint: <code>${p.baseMint}</code>`);
+                const meta = metaResults[i].status === 'fulfilled' ? metaResults[i].value : {};
+                const tokenName = (meta.name && meta.symbol) ? `${meta.name} ($${meta.symbol})` : shortAddr(p.baseMint);
+                L.push(`${i + 1}. ${tokenName} → ${fmtNum(p.lifetime)} ${p.quoteLabel} ${fmtUsd(p.lifetime, p.quoteLabel === 'SOL' ? solUsd : 1)}`);
             }
         }
 
