@@ -308,9 +308,15 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                     const info = parsePoolCreation(tx);
                     if (info) {
                         info.signature = sig;
-                        // Fetch token metadata (name, symbol, image)
+                        // Wait for indexer then fetch token metadata
                         if (info.baseMint) {
-                            const meta = await fetchTokenMeta(info.baseMint);
+                            await new Promise(r => setTimeout(r, 3000)); // Wait 3s for indexer
+                            let meta = await fetchTokenMeta(info.baseMint);
+                            if (meta && !meta.image) {
+                                // Retry once after 3s more if no image
+                                await new Promise(r => setTimeout(r, 3000));
+                                meta = await fetchTokenMeta(info.baseMint);
+                            }
                             if (meta) {
                                 if (!info.tokenName) info.tokenName = meta.name;
                                 if (!info.tokenSymbol) info.tokenSymbol = meta.symbol;
@@ -373,7 +379,12 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                         if (info) {
                             info.signature = s.signature;
                             if (info.baseMint) {
-                                const meta = await fetchTokenMeta(info.baseMint);
+                                await new Promise(r => setTimeout(r, 3000));
+                                let meta = await fetchTokenMeta(info.baseMint);
+                                if (meta && !meta.image) {
+                                    await new Promise(r => setTimeout(r, 3000));
+                                    meta = await fetchTokenMeta(info.baseMint);
+                                }
                                 if (meta) {
                                     if (!info.tokenName) info.tokenName = meta.name;
                                     if (!info.tokenSymbol) info.tokenSymbol = meta.symbol;
