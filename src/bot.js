@@ -239,7 +239,7 @@ bot.onText(/\/totalfee/, async (msg, match) => {
         ));
     }
 
-    await sendHtml(bot, chatId, `⏳ Scanning ${wallets.length} wallet(s)... This may take a minute.`);
+    const statusMsg = await bot.sendMessage(chatId, `⏳ Scanning ${wallets.length} wallet(s)... This may take a minute.`);
     await bot.sendChatAction(chatId, 'typing');
 
     log('INFO', '/totalfee', chatId, `Scanning ${wallets.length} wallet(s): ${wallets.map(w => w.slice(0, 8)).join(', ')}`);
@@ -380,10 +380,10 @@ bot.onText(/\/totalfee/, async (msg, match) => {
         const logTotal = currencies.map(l => `${mergedTotals[l].earned.toFixed(2)} ${l}`).join(' + ');
         log('INFO', '/totalfee', chatId, `Done: ${totalClaimCount} claims, ${logTotal}`);
 
-        return sendHtml(bot, chatId, L.join('\n'));
+        return bot.editMessageText(L.join('\n'), { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML', disable_web_page_preview: true });
     } catch (e) {
         log('ERROR', '/totalfee', chatId, `Exception: ${e.message}`);
-        return sendHtml(bot, chatId, formatError('Error', e.message || 'Unexpected error'));
+        return bot.editMessageText(`❌ Error: ${e.message || 'Unexpected error'}`, { chat_id: chatId, message_id: statusMsg.message_id });
     }
 });
 
