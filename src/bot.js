@@ -1,4 +1,4 @@
-// bot.js — Telegram Bot for DBC Fee & Config Checking
+// bot.js — Telegram Bot for DBC Fee & Config Checking + Config Watcher
 // Entry point: node src/bot.js
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -6,6 +6,7 @@ const { getConfigFromMint } = require('./checkers/configChecker');
 const { getClaimableFees } = require('./checkers/feeChecker');
 const { findPoolByTokenMint, fetchTokenMetadata } = require('./services/poolScanner');
 const { getSolUsdPrice } = require('./services/priceService');
+const { startConfigWatcher } = require('./services/configWatcher');
 const {
     formatConfigMessage,
     formatFeeMessage,
@@ -16,6 +17,11 @@ const {
 // ──── Configuration ──────────────────────────────────────────────────────────
 
 const BOT_TOKEN = '8744533288:AAHk9IYfsYcCzRul6j2-grn_l9bRxorWbz8';
+
+// Chat ID(s) to send deployment notifications to
+// Set this to your group chat ID or personal chat ID
+// To find your chat ID, send /chatid to the bot
+const NOTIFY_CHAT_IDS = [];
 
 // ──── Logging ────────────────────────────────────────────────────────────────
 
@@ -249,6 +255,13 @@ bot.on('callback_query', async (query) => {
     }
 });
 
+// ── /chatid — helper to get chat ID for notifications ───────────────────────
+
+bot.onText(/\/chatid/, (msg) => {
+    const chatId = msg.chat.id;
+    sendHtml(bot, chatId, `📋 <b>Chat ID:</b> <code>${chatId}</code>\n\nAdd this ID to NOTIFY_CHAT_IDS in bot.js to receive deploy notifications here.`);
+});
+
 // ── Error handling ───────────────────────────────────────────────────────────
 
 bot.on('polling_error', (err) => {
@@ -260,3 +273,20 @@ process.on('unhandledRejection', (err) => {
 });
 
 console.log(`[${ts()}] [BOOT] Bot is ready. Listening for commands...`);
+
+// ── Start Config Watcher ─────────────────────────────────────────────────────
+
+startConfigWatcher((ownerName, info, html) => {
+    // Send notification to all configured chat IDs
+    for (const chatId of NOTIFY_CHAT_IDS) {
+        sendHtml(bot, chatId, html, {
+            inline_keyboard: [[
+                { text: '🔍 Check Fee', callback_data: `refresh:${info.baseMint}` }
+            ]]
+        }).catch(e => {
+            console.error(`[${ts()}] [WATCHER] Failed to notify chat ${chatId}: ${e.message}`);
+        });
+    }
+});
+
+console.log(`[${ts()}] [BOOT] Config watcher active. Monitoring configs.txt`);
