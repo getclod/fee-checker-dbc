@@ -5,6 +5,8 @@ const { Connection, PublicKey } = require('@solana/web3.js');
 const { loadSettings } = require('../config/settings');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
+const http = require('http');
 
 const DBC_PROGRAM = 'dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN';
 const CONFIGS_FILE = path.join(__dirname, '../../configs.txt');
@@ -204,6 +206,38 @@ function parsePoolCreation(tx) {
     return { creator, baseMint, pool, configUsed, tokenName, tokenSymbol };
 }
 
+// Fetch token name/symbol via Helius DAS API
+async function fetchTokenMeta(mintAddr) {
+    const settings = loadSettings();
+    const rpcUrl = settings.RPC_URL || '';
+    try {
+        const body = JSON.stringify({
+            jsonrpc: '2.0', id: 1,
+            method: 'getAsset',
+            params: { id: mintAddr }
+        });
+        const res = await new Promise((resolve, reject) => {
+            const url = new URL(rpcUrl);
+            const mod = url.protocol === 'https:' ? https : http;
+            const req = mod.request({ hostname: url.hostname, port: url.port, path: url.pathname + url.search, method: 'POST', headers: { 'Content-Type': 'application/json' } }, (resp) => {
+                let data = '';
+                resp.on('data', c => data += c);
+                resp.on('end', () => resolve(JSON.parse(data)));
+            });
+            req.on('error', reject);
+            req.write(body);
+            req.end();
+        });
+        if (res.result && res.result.content && res.result.content.metadata) {
+            return {
+                name: res.result.content.metadata.name || '',
+                symbol: res.result.content.metadata.symbol || '',
+            };
+        }
+    } catch (_) { }
+    return null;
+}
+
 // ──── Notification format ────────────────────────────────────────────────────
 
 function shortAddr(a) { return (!a || a.length < 14) ? (a || '?') : `${a.slice(0, 6)}...${a.slice(-4)}`; }
@@ -270,6 +304,14 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                     const info = parsePoolCreation(tx);
                     if (info) {
                         info.signature = sig;
+                        // Fetch token name if missing
+                        if ((!info.tokenName || !info.tokenSymbol) && info.baseMint) {
+                            const meta = await fetchTokenMeta(info.baseMint);
+                            if (meta) {
+                                if (!info.tokenName) info.tokenName = meta.name;
+                                if (!info.tokenSymbol) info.tokenSymbol = meta.symbol;
+                            }
+                        }
                         console.log(`[${ts()}] [WS] 🚀 ${ownerName} | ${info.tokenName || '?'} ($${info.tokenSymbol || '?'}) | Mint: ${info.baseMint}`);
                         const html = formatDeployNotification(ownerName, info);
                         onNewDeployment(ownerName, info, html);
@@ -325,6 +367,13 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                         const info = parsePoolCreation(tx);
                         if (info) {
                             info.signature = s.signature;
+                            if ((!info.tokenName || !info.tokenSymbol) && info.baseMint) {
+                                const meta = await fetchTokenMeta(info.baseMint);
+                                if (meta) {
+                                    if (!info.tokenName) info.tokenName = meta.name;
+                                    if (!info.tokenSymbol) info.tokenSymbol = meta.symbol;
+                                }
+                            }
                             console.log(`[${ts()}] [POLL] 🚀 ${item.name} | ${info.tokenName || '?'} ($${info.tokenSymbol || '?'}) | Mint: ${info.baseMint}`);
                             const html = formatDeployNotification(item.name, info);
                             onNewDeployment(item.name, info, html);
