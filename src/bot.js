@@ -182,6 +182,58 @@ bot.onText(/\/fee(.*)/, async (msg, match) => {
         return sendHtml(bot, chatId, formatError('Error', e.message || 'Unexpected error'));
     }
 });
+// ── Auto-detect: bare CA paste → auto fee check ─────────────────────────────
+
+bot.on('message', async (msg) => {
+    const text = (msg.text || '').trim();
+    // Skip commands, empty, or short messages
+    if (!text || text.startsWith('/') || text.length < 32) return;
+
+    // Check if the message is a standalone Solana address
+    const addr = extractAddress(text);
+    if (!addr) return;
+
+    // Only trigger if the message is mostly just the address (allow small extra text)
+    if (text.length > addr.length + 10) return;
+
+    const chatId = msg.chat.id;
+    log('INFO', 'auto-fee', chatId, `Detected CA: ${addr}`);
+
+    await bot.sendChatAction(chatId, 'typing');
+
+    try {
+        const poolInfo = await findPoolByTokenMint(addr);
+        if (!poolInfo || !poolInfo.address) {
+            // Not a DBC pool, silently ignore
+            log('INFO', 'auto-fee', chatId, 'Not a DBC pool, skipping');
+            return;
+        }
+
+        log('INFO', 'auto-fee', chatId, `Pool: ${poolInfo.address}`);
+
+        let solUsd = 0;
+        try { solUsd = await getSolUsdPrice(); } catch (_) { solUsd = 0; }
+
+        const feeData = await getClaimableFees(poolInfo.address, solUsd);
+
+        let tokenMeta = { name: '', symbol: '' };
+        let configData = null;
+        try { tokenMeta = await fetchTokenMetadata(poolInfo.baseMint || addr); } catch (_) { }
+        try {
+            const configResult = await getConfigFromMint(addr);
+            if (configResult.success) configData = configResult.data;
+        } catch (_) { }
+
+        log('INFO', 'auto-fee', chatId,
+            `Fees: ${feeData.totalAvailable || 0} ${feeData.quoteLabel || 'SOL'}`);
+
+        const html = formatFeeMessage(feeData, poolInfo, tokenMeta, solUsd, configData);
+        return sendHtml(bot, chatId, html);
+    } catch (e) {
+        log('ERROR', 'auto-fee', chatId, `Exception: ${e.message}`);
+        // Silently ignore errors for auto-detect
+    }
+});
 
 // ── Error handling ───────────────────────────────────────────────────────────
 
