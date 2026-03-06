@@ -439,11 +439,12 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                     }
                 }
 
-                // On first run, also do initial config polling to mark sigs as seen
+                // On first run, mark existing config sigs as seen (with delay to avoid 429)
                 if (isFirstRun) {
                     const configsToWatch = discovered[wallet.address] || [];
                     for (const cfgAddr of configsToWatch) {
                         await checkConfigForDeploys(connections, cfgAddr, seenSigs);
+                        await new Promise(r => setTimeout(r, 500)); // 500ms delay per config
                     }
                 }
             } catch (e) {
