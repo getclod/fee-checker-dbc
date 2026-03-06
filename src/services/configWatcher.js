@@ -90,8 +90,18 @@ async function discoverConfigs(connections, walletAddr, seenSigs, isInitial) {
     try {
         let allSigs = [];
         if (isInitial) {
-            // Scan last 1000 txs
-            allSigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 1000 }));
+            // Paginate to get ALL txs
+            let before = undefined;
+            while (true) {
+                const opts = { limit: 1000 };
+                if (before) opts.before = before;
+                const batch = await tryRpc(connections, c => c.getSignaturesForAddress(pk, opts));
+                if (batch.length === 0) break;
+                allSigs.push(...batch);
+                if (batch.length < 1000) break;
+                before = batch[batch.length - 1].signature;
+                await new Promise(r => setTimeout(r, 300));
+            }
             console.log(`[${ts()}] [WATCHER] Scan: ${allSigs.length} txs for wallet ${walletAddr.slice(0, 8)}...`);
         } else {
             allSigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 20 }));
