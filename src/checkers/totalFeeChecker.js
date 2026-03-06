@@ -1,15 +1,14 @@
-// totalFeeChecker.js — Get total fees earned across all pools for a config creator wallet
-// Optimized: config cache + pool cache, fresh fee data every call
+// totalFeeChecker.js — Accurate total fees by scanning actual claim/migration transactions
+// Scans wallet tx history → counts real SOL/token gains from DBC interactions
 
 const { Connection, PublicKey } = require('@solana/web3.js');
 const { loadSettings } = require('../config/settings');
-const { getClaimableFees } = require('./feeChecker');
 const fs = require('fs');
 const path = require('path');
 
 const DBC_PROGRAM = 'dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN';
-const DISCOVERED_FILE = path.join(__dirname, '../../.discovered_configs.json');
-const POOL_CACHE_FILE = path.join(__dirname, '../../.discovered_pools.json');
+const USD1_MINT = 'USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB';
+const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
 function createConnections() {
     const settings = loadSettings();
@@ -36,296 +35,158 @@ async function tryRpc(connections, fn, retries = 2) {
     throw lastErr || new Error('All RPCs failed');
 }
 
-// ── Config cache ─────────────────────────────────────────────────────────────
-
-function getConfigsFromCache(walletAddr) {
-    try {
-        if (fs.existsSync(DISCOVERED_FILE)) {
-            const data = JSON.parse(fs.readFileSync(DISCOVERED_FILE, 'utf8'));
-            if (data[walletAddr] && data[walletAddr].length > 0) return data[walletAddr];
-        }
-    } catch (_) { }
-    return null;
-}
-
-// ── Pool cache ───────────────────────────────────────────────────────────────
-
-function loadPoolCache() {
-    try {
-        if (fs.existsSync(POOL_CACHE_FILE)) return JSON.parse(fs.readFileSync(POOL_CACHE_FILE, 'utf8'));
-    } catch (_) { }
-    return {};
-}
-
-function savePoolCache(cache) {
-    try { fs.writeFileSync(POOL_CACHE_FILE, JSON.stringify(cache, null, 2)); } catch (_) { }
-}
-
-// ── Scan wallet txs (paginated, unlimited) ───────────────────────────────────
-
-async function findConfigsByCreator(connections, walletAddr) {
+/**
+ * Scan wallet transaction history for actual DBC fee income.
+ * Counts real SOL/USD1/USDC gains from claim and migration transactions.
+ */
+async function getTotalFees(walletAddr, solUsd = 0) {
+    const connections = createConnections();
     const pk = new PublicKey(walletAddr);
-    const configs = [];
+
+    const totals = {};  // { SOL: { earned: X }, USD1: { earned: Y }, ... }
+    const poolEarnings = {};  // poolAddr → { earned, quoteLabel, signatures }
+    let txCount = 0;
+    let claimCount = 0;
     let before = undefined;
 
-    try {
-        while (true) {
-            const opts = { limit: 1000 };
-            if (before) opts.before = before;
-            const sigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, opts));
-            if (sigs.length === 0) break;
+    // Paginate through ALL wallet transactions
+    while (true) {
+        const opts = { limit: 1000 };
+        if (before) opts.before = before;
 
-            for (let i = 0; i < sigs.length; i += 10) {
-                const batch = sigs.slice(i, i + 10);
-                const results = await Promise.allSettled(
-                    batch.map(s => tryRpc(connections, c => c.getTransaction(s.signature, { maxSupportedTransactionVersion: 0 })))
-                );
-
-                for (const r of results) {
-                    if (r.status !== 'fulfilled' || !r.value) continue;
-                    const tx = r.value;
-                    if (!tx.meta || tx.meta.err) continue;
-                    const logs = (tx.meta.logMessages || []).join(' ').toLowerCase();
-                    if (!logs.includes('createconfig') && !logs.includes('create_config')) continue;
-
-                    try {
-                        const accountKeys = tx.transaction.message.accountKeys || [];
-                        const staticKeys = tx.transaction.message.staticAccountKeys || [];
-                        const allKeys = (accountKeys.length > 0 ? accountKeys : staticKeys).map(k => (typeof k === 'string' ? k : (k.pubkey || k)).toString());
-                        if (tx.meta.loadedAddresses) {
-                            if (tx.meta.loadedAddresses.writable) allKeys.push(...tx.meta.loadedAddresses.writable.map(k => k.toString()));
-                            if (tx.meta.loadedAddresses.readonly) allKeys.push(...tx.meta.loadedAddresses.readonly.map(k => k.toString()));
-                        }
-
-                        for (const ix of (tx.transaction.message.instructions || [])) {
-                            const pid = allKeys[ix.programIdIndex];
-                            if (pid === DBC_PROGRAM) {
-                                const a = ix.accounts || [];
-                                if (a.length >= 2) {
-                                    const configAddr = allKeys[a[0]];
-                                    if (configAddr && !configs.includes(configAddr)) configs.push(configAddr);
-                                }
-                            }
-                        }
-                    } catch (_) { }
-                }
-
-                if (i + 10 < sigs.length) await new Promise(r => setTimeout(r, 100));
-            }
-
-            // Paginate: if we got 1000, there might be more
-            if (sigs.length < 1000) break;
-            before = sigs[sigs.length - 1].signature;
-            await new Promise(r => setTimeout(r, 300));
+        let sigs;
+        try {
+            sigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, opts));
+        } catch (e) {
+            console.error(`[totalFee] Sig scan error: ${(e.message || '').slice(0, 80)}`);
+            break;
         }
-    } catch (e) {
-        console.error(`[totalFee] Scan error: ${(e.message || '').slice(0, 80)}`);
-    }
+        if (sigs.length === 0) break;
 
-    return configs;
-}
-
-// ── Find pools per config (with caching) ─────────────────────────────────────
-
-async function findPoolsByConfig(connections, configAddr, poolCache) {
-    // Check cache first
-    if (poolCache[configAddr] && poolCache[configAddr].length > 0) {
-        return poolCache[configAddr];
-    }
-
-    const pools = [];
-    try {
-        const pk = new PublicKey(configAddr);
-        const sigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 200 }));
-
+        // Process in batches of 10
         for (let i = 0; i < sigs.length; i += 10) {
             const batch = sigs.slice(i, i + 10);
             const results = await Promise.allSettled(
                 batch.map(s => tryRpc(connections, c => c.getTransaction(s.signature, { maxSupportedTransactionVersion: 0 })))
             );
 
-            for (const r of results) {
-                if (r.status !== 'fulfilled' || !r.value) continue;
-                const tx = r.value;
+            for (let bi = 0; bi < batch.length; bi++) {
+                if (results[bi].status !== 'fulfilled' || !results[bi].value) continue;
+                const tx = results[bi].value;
                 if (!tx.meta || tx.meta.err) continue;
+                txCount++;
+
+                // Check if DBC program is involved
+                const accountKeys = tx.transaction.message.accountKeys || [];
+                const staticKeys = tx.transaction.message.staticAccountKeys || [];
+                const allKeys = (accountKeys.length > 0 ? accountKeys : staticKeys).map(k =>
+                    (typeof k === 'string' ? k : (k.pubkey || k)).toString()
+                );
+                if (tx.meta.loadedAddresses) {
+                    if (tx.meta.loadedAddresses.writable) allKeys.push(...tx.meta.loadedAddresses.writable.map(k => k.toString()));
+                    if (tx.meta.loadedAddresses.readonly) allKeys.push(...tx.meta.loadedAddresses.readonly.map(k => k.toString()));
+                }
+
+                const hasDBC = allKeys.includes(DBC_PROGRAM);
+                if (!hasDBC) continue;
+
+                // Check logs for claim/migration (skip create_config and initialize)
                 const logs = (tx.meta.logMessages || []).join(' ').toLowerCase();
-                if (!logs.includes('initializevirtualpool') && !logs.includes('initialize_virtual_pool')) continue;
+                const isSetup = logs.includes('createconfig') || logs.includes('create_config')
+                    || logs.includes('initializevirtualpool') || logs.includes('initialize_virtual_pool');
+                if (isSetup) continue;
 
-                try {
-                    const accountKeys = tx.transaction.message.accountKeys || [];
-                    const staticKeys = tx.transaction.message.staticAccountKeys || [];
-                    const allKeys = (accountKeys.length > 0 ? accountKeys : staticKeys).map(k => (typeof k === 'string' ? k : (k.pubkey || k)).toString());
-                    if (tx.meta.loadedAddresses) {
-                        if (tx.meta.loadedAddresses.writable) allKeys.push(...tx.meta.loadedAddresses.writable.map(k => k.toString()));
-                        if (tx.meta.loadedAddresses.readonly) allKeys.push(...tx.meta.loadedAddresses.readonly.map(k => k.toString()));
+                // Find wallet index
+                const walletIndex = allKeys.indexOf(walletAddr);
+                if (walletIndex === -1) continue;
+
+                // Find pool address from DBC instruction (typically one of the first accounts)
+                let poolAddr = null;
+                for (const ix of (tx.transaction.message.instructions || [])) {
+                    const pid = allKeys[ix.programIdIndex];
+                    if (pid === DBC_PROGRAM) {
+                        const a = ix.accounts || [];
+                        // Pool is usually in the first few accounts
+                        for (let ai = 0; ai < Math.min(a.length, 5); ai++) {
+                            const addr = allKeys[a[ai]];
+                            if (addr && addr !== walletAddr && addr !== DBC_PROGRAM) {
+                                poolAddr = addr;
+                                break;
+                            }
+                        }
+                        break;
                     }
+                }
 
-                    for (const ix of (tx.transaction.message.instructions || [])) {
-                        const pid = allKeys[ix.programIdIndex];
-                        if (pid === DBC_PROGRAM) {
-                            const a = ix.accounts || [];
-                            if (a.length >= 6) {
-                                const poolAddr = allKeys[a[5]];
-                                const baseMint = allKeys[a[3]];
-                                if (poolAddr && !pools.find(p => p.address === poolAddr)) {
-                                    pools.push({ address: poolAddr, baseMint, config: configAddr });
-                                }
+                // Calculate SOL gain
+                const pre = tx.meta.preBalances?.[walletIndex] || 0;
+                const post = tx.meta.postBalances?.[walletIndex] || 0;
+                const solGain = (post - pre) / 1e9;
+
+                if (solGain > 0.0005) {
+                    if (!totals.SOL) totals.SOL = { earned: 0 };
+                    totals.SOL.earned += solGain;
+                    claimCount++;
+
+                    if (poolAddr) {
+                        if (!poolEarnings[poolAddr]) poolEarnings[poolAddr] = { earned: 0, quoteLabel: 'SOL' };
+                        poolEarnings[poolAddr].earned += solGain;
+                        poolEarnings[poolAddr].quoteLabel = 'SOL';
+                    }
+                }
+
+                // Check USD1/USDC token gains
+                if (tx.meta.preTokenBalances && tx.meta.postTokenBalances) {
+                    for (const postBal of tx.meta.postTokenBalances) {
+                        if (postBal.owner !== walletAddr) continue;
+                        const mint = postBal.mint;
+                        if (mint !== USD1_MINT && mint !== USDC_MINT) continue;
+
+                        const postAmount = Number(postBal.uiTokenAmount?.uiAmount || 0);
+                        const preBal = tx.meta.preTokenBalances.find(p => p.owner === walletAddr && p.mint === mint);
+                        const preAmount = preBal ? Number(preBal.uiTokenAmount?.uiAmount || 0) : 0;
+                        const tokenGain = postAmount - preAmount;
+
+                        if (tokenGain > 0.001) {
+                            const label = mint === USD1_MINT ? 'USD1' : 'USDC';
+                            if (!totals[label]) totals[label] = { earned: 0 };
+                            totals[label].earned += tokenGain;
+                            claimCount++;
+
+                            if (poolAddr) {
+                                if (!poolEarnings[poolAddr]) poolEarnings[poolAddr] = { earned: 0, quoteLabel: label };
+                                poolEarnings[poolAddr].earned += tokenGain;
+                                poolEarnings[poolAddr].quoteLabel = label;
                             }
                         }
                     }
-                } catch (_) { }
+                }
             }
 
             if (i + 10 < sigs.length) await new Promise(r => setTimeout(r, 100));
         }
-    } catch (e) {
-        console.error(`[totalFee] Pools error ${configAddr.slice(0, 8)}: ${(e.message || '').slice(0, 80)}`);
+
+        if (sigs.length < 1000) break;
+        before = sigs[sigs.length - 1].signature;
+        await new Promise(r => setTimeout(r, 300));
     }
 
-    // Save to cache
-    if (pools.length > 0) poolCache[configAddr] = pools;
-    return pools;
-}
-
-// ── Main ─────────────────────────────────────────────────────────────────────
-
-async function getTotalFees(walletAddr, solUsd = 0) {
-    const connections = createConnections();
-    const poolCache = loadPoolCache();
-
-    // 1. Configs: cache first, then fallback scan (paginated, unlimited)
-    let configs = getConfigsFromCache(walletAddr);
-    if (!configs) {
-        configs = await findConfigsByCreator(connections, walletAddr);
-    }
-    if (configs.length === 0) return { configs: [], grandTotal: 0, error: 'No configs found for this wallet' };
-
-    const results = [];
-    let grandTotalLifetime = 0;
-    let grandTotalClaimed = 0;
-    let grandTotalAvailable = 0;
-    let poolCount = 0;
-
-    // 2. Find pools (cached = instant, uncached = scan config txs)
-    const allPools = [];
-    let hadUncached = false;
-    for (const c of configs) {
-        const wasCached = !!poolCache[c];
-        const pools = await findPoolsByConfig(connections, c, poolCache);
-        allPools.push({ config: c, pools });
-        if (!wasCached && pools.length > 0) {
-            hadUncached = true;
-            await new Promise(r => setTimeout(r, 500));
-        }
-    }
-    if (hadUncached) savePoolCache(poolCache);
-
-    // 3. Flatten all pools → check 3 at a time, 300ms between
-    const configPoolMap = {};
-    const flatPools = [];
-    for (const { config: configAddr, pools } of allPools) {
-        configPoolMap[configAddr] = { configTotal: 0, configClaimed: 0, configAvailable: 0, poolDetails: [] };
-        for (const p of pools) flatPools.push({ ...p, configAddr });
-    }
-    poolCount = flatPools.length;
-
-    const failedPools = [];
-
-    for (let i = 0; i < flatPools.length; i += 3) {
-        const batch = flatPools.slice(i, i + 3);
-        const feeResults = await Promise.allSettled(
-            batch.map(p => getClaimableFees(p.address, solUsd))
-        );
-
-        for (let j = 0; j < batch.length; j++) {
-            const fees = feeResults[j].status === 'fulfilled' ? feeResults[j].value : null;
-            if (!fees || fees.error) {
-                failedPools.push(batch[j]);
-                continue;
-            }
-            const cm = configPoolMap[batch[j].configAddr];
-            cm.configTotal += fees.totalLifetime || 0;
-            cm.configClaimed += fees.totalClaimed || 0;
-            cm.configAvailable += fees.totalAvailable || 0;
-            cm.poolDetails.push({
-                address: batch[j].address,
-                baseMint: batch[j].baseMint,
-                lifetime: fees.totalLifetime || 0,
-                claimed: fees.totalClaimed || 0,
-                available: fees.totalAvailable || 0,
-                quoteLabel: fees.quoteLabel || 'SOL',
-            });
-        }
-
-        if (i + 3 < flatPools.length) await new Promise(r => setTimeout(r, 300));
-    }
-
-    // Retry failed pools once
-    if (failedPools.length > 0) {
-        await new Promise(r => setTimeout(r, 2000));
-        for (let i = 0; i < failedPools.length; i += 2) {
-            const batch = failedPools.slice(i, i + 2);
-            const feeResults = await Promise.allSettled(
-                batch.map(p => getClaimableFees(p.address, solUsd))
-            );
-            for (let j = 0; j < batch.length; j++) {
-                const fees = feeResults[j].status === 'fulfilled' ? feeResults[j].value : null;
-                if (!fees || fees.error) continue;
-                const cm = configPoolMap[batch[j].configAddr];
-                cm.configTotal += fees.totalLifetime || 0;
-                cm.configClaimed += fees.totalClaimed || 0;
-                cm.configAvailable += fees.totalAvailable || 0;
-                cm.poolDetails.push({
-                    address: batch[j].address,
-                    baseMint: batch[j].baseMint,
-                    lifetime: fees.totalLifetime || 0,
-                    claimed: fees.totalClaimed || 0,
-                    available: fees.totalAvailable || 0,
-                    quoteLabel: fees.quoteLabel || 'SOL',
-                });
-            }
-            if (i + 2 < failedPools.length) await new Promise(r => setTimeout(r, 500));
-        }
-    }
-
-    // 4. Aggregate results — separate by currency
-    const totals = {}; // { SOL: { lifetime, claimed, available }, USD1: {...}, ... }
-
-    for (const { config: configAddr } of allPools) {
-        const cm = configPoolMap[configAddr];
-
-        // Group pool fees by quoteLabel
-        const configTotals = {};
-        for (const p of cm.poolDetails) {
-            const lbl = p.quoteLabel || 'SOL';
-            if (!configTotals[lbl]) configTotals[lbl] = { lifetime: 0, claimed: 0, available: 0 };
-            configTotals[lbl].lifetime += p.lifetime;
-            configTotals[lbl].claimed += p.claimed;
-            configTotals[lbl].available += p.available;
-        }
-
-        // Add to grand totals
-        for (const [lbl, t] of Object.entries(configTotals)) {
-            if (!totals[lbl]) totals[lbl] = { lifetime: 0, claimed: 0, available: 0 };
-            totals[lbl].lifetime += t.lifetime;
-            totals[lbl].claimed += t.claimed;
-            totals[lbl].available += t.available;
-        }
-
-        results.push({
-            config: configAddr,
-            pools: cm.poolDetails,
-            totalLifetime: cm.configTotal,
-            totalClaimed: cm.configClaimed,
-            totalAvailable: cm.configAvailable,
-        });
-    }
+    // Build top pools list
+    const topPools = Object.entries(poolEarnings)
+        .map(([addr, data]) => ({ address: addr, earned: data.earned, quoteLabel: data.quoteLabel }))
+        .sort((a, b) => {
+            const aUsd = a.earned * (a.quoteLabel === 'SOL' ? solUsd : 1);
+            const bUsd = b.earned * (b.quoteLabel === 'SOL' ? solUsd : 1);
+            return bUsd - aUsd;
+        })
+        .slice(0, 10);
 
     return {
         wallet: walletAddr,
-        configs: results,
-        poolCount,
         totals,
+        topPools,
+        txCount,
+        claimCount,
         solUsd,
     };
 }

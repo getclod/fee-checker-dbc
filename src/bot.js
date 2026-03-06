@@ -230,7 +230,7 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
         ));
     }
 
-    await sendHtml(bot, chatId, '⏳ Scanning all configs & pools... This may take a minute.');
+    await sendHtml(bot, chatId, '⏳ Scanning wallet transactions... This may take a minute.');
     await bot.sendChatAction(chatId, 'typing');
 
     log('INFO', '/totalfee', chatId, `Scanning wallet: ${wallet}`);
@@ -241,11 +241,6 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
 
         const result = await getTotalFees(wallet, solUsd);
 
-        if (result.error) {
-            return sendHtml(bot, chatId, formatError('No Configs', result.error));
-        }
-
-        // Format the result
         const shortAddr = (a) => (!a || a.length < 14) ? (a || '?') : `${a.slice(0, 6)}...${a.slice(-4)}`;
         const fmtNum = (n) => Number(n || 0).toFixed(6);
         const fmtUsd = (n, price) => {
@@ -256,10 +251,10 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
         const L = [];
         L.push(`💰 <b>Total Fee Report</b>`);
         L.push(`👤 Wallet: <a href="https://solscan.io/account/${wallet}">${shortAddr(wallet)}</a>`);
-        L.push(`📊 ${result.configs.length} configs | ${result.poolCount} pools`);
+        L.push(`📊 ${result.txCount} DBC txs | ${result.claimCount} claims`);
         L.push(``);
 
-        // Per-currency totals
+        // Per-currency earned totals
         let totalUsdValue = 0;
         const currencyOrder = ['SOL', 'USD1', 'USDC'];
         const currencies = Object.keys(result.totals).sort((a, b) => {
@@ -271,44 +266,27 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
         for (const lbl of currencies) {
             const t = result.totals[lbl];
             const price = lbl === 'SOL' ? solUsd : 1;
-            const usdVal = t.lifetime * price;
-            totalUsdValue += usdVal;
+            totalUsdValue += t.earned * price;
             L.push(`<b>── ${lbl} ──</b>`);
-            L.push(`💎 Lifetime: ${fmtNum(t.lifetime)} ${lbl} ${fmtUsd(t.lifetime, price)}`);
-            L.push(`✅ Claimed: ${fmtNum(t.claimed)} ${lbl} ${fmtUsd(t.claimed, price)}`);
-            L.push(`🔓 Available: ${fmtNum(t.available)} ${lbl} ${fmtUsd(t.available, price)}`);
+            L.push(`💰 Total Earned: ${fmtNum(t.earned)} ${lbl} ${fmtUsd(t.earned, price)}`);
             L.push(``);
         }
 
-        L.push(`💵 <b>Total USD Value: $${totalUsdValue.toFixed(2)}</b>`);
+        L.push(`💵 <b>Total: $${totalUsdValue.toFixed(2)}</b>`);
 
-        // Top 10 pools by fee (convert to USD for sorting)
-        const allPoolDetails = [];
-        for (const cfg of result.configs) {
-            for (const p of cfg.pools) {
+        // Top 10 pools
+        if (result.topPools.length > 0) {
+            L.push(``);
+            L.push(`🏆 <b>Top ${result.topPools.length} Pools:</b>`);
+            for (let i = 0; i < result.topPools.length; i++) {
+                const p = result.topPools[i];
                 const price = p.quoteLabel === 'SOL' ? solUsd : 1;
-                allPoolDetails.push({ ...p, usdValue: p.lifetime * price, config: cfg.config });
-            }
-        }
-        const top10 = allPoolDetails.sort((a, b) => b.usdValue - a.usdValue).slice(0, 10);
-        if (top10.length > 0) {
-            // Fetch token names for top 10
-            const metaResults = await Promise.allSettled(
-                top10.map(p => fetchTokenMetadata(p.baseMint))
-            );
-
-            L.push(``);
-            L.push(`🏆 <b>Top ${top10.length} Pools by Fee:</b>`);
-            for (let i = 0; i < top10.length; i++) {
-                const p = top10[i];
-                const meta = metaResults[i].status === 'fulfilled' ? metaResults[i].value : {};
-                const tokenName = (meta.name && meta.symbol) ? `${meta.name} ($${meta.symbol})` : shortAddr(p.baseMint);
-                L.push(`${i + 1}. ${tokenName} → ${fmtNum(p.lifetime)} ${p.quoteLabel} ${fmtUsd(p.lifetime, p.quoteLabel === 'SOL' ? solUsd : 1)}`);
+                L.push(`${i + 1}. <a href="https://solscan.io/account/${p.address}">${shortAddr(p.address)}</a> → ${fmtNum(p.earned)} ${p.quoteLabel} ${fmtUsd(p.earned, price)}`);
             }
         }
 
-        const logTotal = currencies.map(l => `${result.totals[l].lifetime.toFixed(2)} ${l}`).join(' + ');
-        log('INFO', '/totalfee', chatId, `Done: ${result.configs.length} configs, ${result.poolCount} pools, ${logTotal}`);
+        const logTotal = currencies.map(l => `${result.totals[l].earned.toFixed(2)} ${l}`).join(' + ');
+        log('INFO', '/totalfee', chatId, `Done: ${result.claimCount} claims, ${logTotal}`);
 
         return sendHtml(bot, chatId, L.join('\n'));
     } catch (e) {
