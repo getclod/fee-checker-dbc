@@ -79,17 +79,9 @@ async function discoverConfigs(connections, walletAddr, seenSigs, isInitial) {
     try {
         let allSigs = [];
         if (isInitial) {
-            let before = undefined;
-            for (let p = 0; p < 10; p++) {
-                const opts = { limit: 1000 };
-                if (before) opts.before = before;
-                const page = await tryRpc(connections, c => c.getSignaturesForAddress(pk, opts));
-                if (!page || page.length === 0) break;
-                allSigs = allSigs.concat(page);
-                before = page[page.length - 1].signature;
-                if (page.length < 1000) break;
-            }
-            console.log(`[${ts()}] [WATCHER] Deep scan: ${allSigs.length} txs for wallet ${walletAddr.slice(0, 8)}...`);
+            // Scan last 200 txs — enough to find create_config
+            allSigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 200 }));
+            console.log(`[${ts()}] [WATCHER] Scan: ${allSigs.length} txs for wallet ${walletAddr.slice(0, 8)}...`);
         } else {
             allSigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 20 }));
         }
