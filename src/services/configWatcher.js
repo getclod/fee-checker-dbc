@@ -103,9 +103,12 @@ async function discoverConfigs(connections, walletAddr, seenSigs) {
     const newConfigs = [];
 
     try {
+        // Fetch more transactions to find create_config among transfers/claims
         const signatures = await tryRpc(connections, (conn) =>
-            conn.getSignaturesForAddress(pk, { limit: 20 })
+            conn.getSignaturesForAddress(pk, { limit: 100 })
         );
+
+        console.log(`[${ts()}] [WATCHER] Scanning ${signatures.length} txs for wallet ${walletAddr.slice(0, 8)}...`);
 
         for (const sig of signatures) {
             if (seenSigs[key].includes(sig.signature)) continue;
@@ -117,29 +120,43 @@ async function discoverConfigs(connections, walletAddr, seenSigs) {
 
                 if (tx && tx.meta && !tx.meta.err) {
                     const logs = tx.meta.logMessages || [];
-                    const isCreateConfig = logs.some(l => l.includes('create_config'));
+                    const logsJoined = logs.join(' ').toLowerCase();
 
-                    if (isCreateConfig) {
-                        // Extract config address from instruction accounts
-                        // In create_config: first account of DBC instruction is the new config
-                        try {
-                            const accountKeys = tx.transaction.message.accountKeys || [];
-                            const keys = accountKeys.map(k => typeof k === 'string' ? k : (k.pubkey || k).toString());
+                    // Check for create_config in various formats
+                    const isCreateConfig = logsJoined.includes('create_config')
+                        || logsJoined.includes('createconfig')
+                        || logsJoined.includes('create_pool_config');
 
-                            for (const ix of (tx.transaction.message.instructions || [])) {
-                                const programId = keys[ix.programIdIndex];
-                                if (programId === DBC_PROGRAM) {
-                                    const accs = ix.accounts || [];
-                                    if (accs.length >= 1) {
-                                        const configAddr = keys[accs[0]];
-                                        if (configAddr && configAddr !== walletAddr && configAddr !== DBC_PROGRAM) {
-                                            newConfigs.push(configAddr);
-                                            console.log(`[${ts()}] [WATCHER] 🔍 Discovered config: ${configAddr}`);
-                                        }
+                    // Also check if this tx interacts with DBC program and creates a new account
+                    let hasDBC = false;
+                    let dbcConfigAddr = null;
+
+                    try {
+                        const accountKeys = tx.transaction.message.accountKeys || [];
+                        const keys = accountKeys.map(k => typeof k === 'string' ? k : (k.pubkey || k).toString());
+
+                        for (const ix of (tx.transaction.message.instructions || [])) {
+                            const programId = keys[ix.programIdIndex];
+                            if (programId === DBC_PROGRAM) {
+                                hasDBC = true;
+                                const accs = ix.accounts || [];
+                                if (accs.length >= 1) {
+                                    const candidateAddr = keys[accs[0]];
+                                    if (candidateAddr && candidateAddr !== walletAddr && candidateAddr !== DBC_PROGRAM) {
+                                        dbcConfigAddr = candidateAddr;
                                     }
                                 }
                             }
-                        } catch (_) { }
+                        }
+                    } catch (_) { }
+
+                    // If it's a create_config OR it's a DBC tx that's NOT a pool init and NOT a claim
+                    const isPoolInit = logsJoined.includes('initialize_virtual_pool') || logsJoined.includes('evtinitializepool');
+                    const isClaim = logsJoined.includes('claim');
+
+                    if ((isCreateConfig || (hasDBC && !isPoolInit && !isClaim)) && dbcConfigAddr) {
+                        newConfigs.push(dbcConfigAddr);
+                        console.log(`[${ts()}] [WATCHER] 🔍 Discovered config: ${dbcConfigAddr}`);
                     }
                 }
             } catch (_) { }
