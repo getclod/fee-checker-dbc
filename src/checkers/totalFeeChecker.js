@@ -92,8 +92,8 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                 const logsLower = logs.toLowerCase();
                 const METEORA_PROGRAMS = [
                     DBC_PROGRAM,
+                    'cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG',  // DAMM V2 (claim_position_fee)
                     'dammHigMi3F1y1RV3yMVGddTR6KMZMvASqthUit3iAh',  // DAMM V1
-                    'dbcaj3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN',  // DBC alt
                     'METAewgxyPbgwsseH8T16a39CQ5VyVxVi9qKEBBiTRe',  // Meteora
                     'LockrVhBZJ255MJpv4efC3J3cLnkKiZqkZLDUvXe68g',  // Lock escrow
                 ];
