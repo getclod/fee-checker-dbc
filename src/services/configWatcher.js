@@ -10,7 +10,7 @@ const DBC_PROGRAM = 'dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN';
 const CONFIGS_FILE = path.join(__dirname, '../../configs.txt');
 const SEEN_FILE = path.join(__dirname, '../../.seen_sigs.json');
 
-const POLL_INTERVAL = 30_000; // 30 seconds
+const POLL_INTERVAL = 10_000; // 10 seconds
 
 // ──── RPC ────────────────────────────────────────────────────────────────────
 
