@@ -215,8 +215,16 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
             if (!wsConnection) {
                 const settings = loadSettings();
                 const rpcUrl = settings.RPC_URL || '';
+                // Helius dedicated: just swap https→wss
                 const wsUrl = rpcUrl.replace('https://', 'wss://').replace('http://', 'ws://');
+                console.log(`[${ts()}] [WS] Connecting to ${wsUrl.slice(0, 40)}...`);
                 wsConnection = new Connection(rpcUrl, { commitment: 'confirmed', wsEndpoint: wsUrl });
+
+                // Test: subscribe to DBC program to verify WS works
+                wsConnection.onLogs(new PublicKey(DBC_PROGRAM), (logs) => {
+                    console.log(`[${ts()}] [WS] 📡 DBC activity: ${logs.signature.slice(0, 16)}...`);
+                }, 'confirmed');
+                console.log(`[${ts()}] [WS] Test subscription to DBC program active`);
             }
             wsConnection.onLogs(new PublicKey(configAddr), async (logs) => {
                 try {
