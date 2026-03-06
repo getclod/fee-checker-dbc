@@ -17,14 +17,20 @@ function createConnections() {
     return rpcs.map(url => new Connection(url, { commitment: 'confirmed', disableRetryOnRateLimit: true }));
 }
 
-async function tryRpc(connections, fn) {
+async function tryRpc(connections, fn, retries = 2) {
     let lastErr;
-    for (const conn of connections) {
-        try { return await fn(conn); } catch (e) {
-            lastErr = e;
-            const msg = e.message || '';
-            if (msg.includes('429') || msg.includes('502') || msg.includes('403') || msg.includes('ETIMEDOUT')) continue;
-            throw e;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        for (const conn of connections) {
+            try { return await fn(conn); } catch (e) {
+                lastErr = e;
+                const msg = e.message || '';
+                if (msg.includes('429') || msg.includes('502') || msg.includes('Too many') || msg.includes('ETIMEDOUT') || msg.includes('ECONNRESET')) {
+                    await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+                    continue;
+                }
+                if (msg.includes('403') || msg.includes('not allowed')) continue;
+                throw e;
+            }
         }
     }
     throw lastErr || new Error('All RPCs failed');
@@ -205,7 +211,8 @@ async function getTotalFees(walletAddr, solUsd = 0) {
     for (const c of configs) {
         const pools = await findPoolsByConfig(connections, c, poolCache);
         allPools.push({ config: c, pools });
-        if (!poolCache[c]) await new Promise(r => setTimeout(r, 300));
+        // Always delay between configs to avoid 429
+        await new Promise(r => setTimeout(r, 500));
     }
     savePoolCache(poolCache);
 
