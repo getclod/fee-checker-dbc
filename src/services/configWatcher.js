@@ -12,12 +12,34 @@ const SEEN_FILE = path.join(__dirname, '../../.seen_sigs.json');
 
 const POLL_INTERVAL = 30_000; // 30 seconds
 
-function createRpcConnection() {
+// Public RPCs that support getSignaturesForAddress
+const WATCHER_RPCS = [
+    'https://api.mainnet-beta.solana.com',
+    'https://solana-mainnet.g.alchemy.com/v2/demo',
+];
+
+function createWatcherConnection() {
+    // Try public RPC first (supports getSignaturesForAddress)
     const settings = loadSettings();
-    return new Connection(settings.RPC_URL, {
+    const rpcs = [...WATCHER_RPCS, settings.RPC_URL];
+    return rpcs.map(url => new Connection(url, {
         commitment: 'confirmed',
-        httpHeaders: { Origin: settings.RPC_ORIGIN },
-    });
+    }));
+}
+
+// Try multiple RPCs until one works
+async function tryRpc(connections, fn) {
+    for (const conn of connections) {
+        try {
+            return await fn(conn);
+        } catch (e) {
+            if (e.message && (e.message.includes('403') || e.message.includes('not allowed') || e.message.includes('429'))) {
+                continue; // Try next RPC
+            }
+            throw e;
+        }
+    }
+    throw new Error('All RPCs failed');
 }
 
 function ts() {
@@ -154,34 +176,30 @@ function parsePoolCreation(tx, configAddress) {
 /**
  * Check a config address for new pool deployments
  */
-async function checkConfigForNewPools(connection, configAddr, seenSigs) {
+async function checkConfigForNewPools(connections, configAddr, seenSigs) {
     const configPk = new PublicKey(configAddr);
     const key = configAddr;
 
     if (!seenSigs[key]) seenSigs[key] = [];
 
     try {
-        const signatures = await connection.getSignaturesForAddress(configPk, {
-            limit: 10,
-        });
+        const signatures = await tryRpc(connections, (conn) =>
+            conn.getSignaturesForAddress(configPk, { limit: 10 })
+        );
 
         const newDeployments = [];
 
         for (const sig of signatures) {
             if (seenSigs[key].includes(sig.signature)) continue;
 
-            // New signature — check if it's a pool creation
             try {
-                const tx = await connection.getTransaction(sig.signature, {
-                    maxSupportedTransactionVersion: 0,
-                });
+                const tx = await tryRpc(connections, (conn) =>
+                    conn.getTransaction(sig.signature, { maxSupportedTransactionVersion: 0 })
+                );
 
                 const result = parsePoolCreation(tx, configAddr);
                 if (result) {
-                    newDeployments.push({
-                        signature: sig.signature,
-                        ...result,
-                    });
+                    newDeployments.push({ signature: sig.signature, ...result });
                 }
             } catch (_) { }
 
@@ -231,7 +249,7 @@ function formatDeployNotification(ownerName, info) {
  * @param {Function} onNewDeployment - callback(ownerName, info, formattedHtml)
  */
 function startConfigWatcher(onNewDeployment) {
-    const connection = createRpcConnection();
+    const connections = createWatcherConnection();
     const seenSigs = loadSeenSigs();
 
     console.log(`[${ts()}] [WATCHER] Config watcher starting...`);
@@ -245,7 +263,7 @@ function startConfigWatcher(onNewDeployment) {
 
         for (const cfg of configs) {
             try {
-                const newDeployments = await checkConfigForNewPools(connection, cfg.address, seenSigs);
+                const newDeployments = await checkConfigForNewPools(connections, cfg.address, seenSigs);
 
                 if (!isFirstRun && newDeployments.length > 0) {
                     for (const info of newDeployments) {
