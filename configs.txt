@@ -1,1 +1,8 @@
-8ksMpFpgg9xTerLYgaLRoyWP5U1dbaV36YEeV2kqg6eb:MAEL
+# Format: type:address:NAME
+# type = config (monitor specific config) or wallet (monitor all deploys from wallet)
+
+# Monitor by config address
+config:8ksMpFpgg9xTerLYgaLRoyWP5U1dbaV36YEeV2kqg6eb:MAEL
+
+# Monitor by wallet (detect all deploys regardless of config)
+# wallet:Amoyir2E9Y3cMbzaskcFrcrJQW89fPMAWscc7Ld3CgT2:MAEL
