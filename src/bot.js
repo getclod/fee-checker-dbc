@@ -262,6 +262,24 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
         L.push(`✅ <b>Total Claimed: ${fmtNum(result.grandTotalClaimed)} SOL</b> ${fmtUsd(result.grandTotalClaimed, solUsd)}`);
         L.push(`🔓 <b>Total Available: ${fmtNum(result.grandTotalAvailable)} SOL</b> ${fmtUsd(result.grandTotalAvailable, solUsd)}`);
 
+        // Top 10 pools by lifetime fee
+        const allPoolDetails = [];
+        for (const cfg of result.configs) {
+            for (const p of cfg.pools) {
+                allPoolDetails.push({ ...p, config: cfg.config });
+            }
+        }
+        const top10 = allPoolDetails.sort((a, b) => b.lifetime - a.lifetime).slice(0, 10);
+        if (top10.length > 0) {
+            L.push(``);
+            L.push(`🏆 <b>Top ${top10.length} Pools by Fee:</b>`);
+            for (let i = 0; i < top10.length; i++) {
+                const p = top10[i];
+                L.push(`${i + 1}. <a href="https://solscan.io/account/${p.address}">${shortAddr(p.address)}</a> → ${fmtNum(p.lifetime)} ${p.quoteLabel} ${fmtUsd(p.lifetime, p.quoteLabel === 'SOL' ? solUsd : 1)}`);
+                L.push(`   Mint: <code>${p.baseMint}</code>`);
+            }
+        }
+
         log('INFO', '/totalfee', chatId, `Done: ${result.configs.length} configs, ${result.poolCount} pools, lifetime=${result.grandTotalLifetime}`);
 
         return sendHtml(bot, chatId, L.join('\n'));
