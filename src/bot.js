@@ -366,7 +366,8 @@ bot.onText(/\/totalfee/, async (msg, match) => {
                 const t = sortedTokens[i];
                 const price = t.quoteLabel === 'SOL' ? solUsd : 1;
                 const meta = t.baseMint ? metaMap[t.baseMint] : null;
-                const label = (meta && meta.symbol) ? `$${meta.symbol}` : '???';
+                const symbol = (meta && meta.symbol) ? `$${meta.symbol}` : '???';
+                const label = t.baseMint ? `<a href="https://solscan.io/token/${t.baseMint}">${symbol}</a>` : symbol;
                 L.push(`${i + 1}. ${label} → ${fmtNum(t.total)} ${t.quoteLabel} ${fmtUsd(t.total, price)}`);
                 // Show breakdown if both fee + migration exist
                 const parts = [];
