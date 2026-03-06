@@ -4,7 +4,6 @@
 const { Connection, PublicKey } = require('@solana/web3.js');
 const { loadSettings } = require('../config/settings');
 const { getClaimableFees } = require('./feeChecker');
-const { parsePoolAccountData } = require('../services/poolScanner');
 
 const DBC_PROGRAM = 'dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN';
 
@@ -89,30 +88,53 @@ async function findConfigsByCreator(connections, walletAddr) {
 
 /**
  * Find all pool addresses for a given config address.
- * Uses getProgramAccounts with memcmp filter on config offset (byte 8).
+ * Scans config's transaction history for initialize_virtual_pool.
  */
 async function findPoolsByConfig(connections, configAddr) {
     const pools = [];
     try {
-        const configPk = new PublicKey(configAddr);
-        const accounts = await tryRpc(connections, c =>
-            c.getProgramAccounts(new PublicKey(DBC_PROGRAM), {
-                filters: [{ memcmp: { offset: 8, bytes: configPk.toBase58() } }],
-                commitment: 'confirmed',
-                encoding: 'base64',
-            })
-        );
+        const pk = new PublicKey(configAddr);
+        const sigs = await tryRpc(connections, c => c.getSignaturesForAddress(pk, { limit: 200 }));
 
-        for (const { pubkey, account } of accounts) {
-            const data = Buffer.from(account.data, 'base64');
-            const parsed = parsePoolAccountData(data);
-            if (parsed) {
-                pools.push({
-                    address: pubkey.toBase58(),
-                    baseMint: parsed.baseMint,
-                    config: configAddr,
-                });
+        for (let i = 0; i < sigs.length; i += 5) {
+            const batch = sigs.slice(i, i + 5);
+            const results = await Promise.allSettled(
+                batch.map(s => tryRpc(connections, c => c.getTransaction(s.signature, { maxSupportedTransactionVersion: 0 })))
+            );
+
+            for (const r of results) {
+                if (r.status !== 'fulfilled' || !r.value) continue;
+                const tx = r.value;
+                if (!tx.meta || tx.meta.err) continue;
+                const logs = (tx.meta.logMessages || []).join(' ').toLowerCase();
+                if (!logs.includes('initializevirtualpool') && !logs.includes('initialize_virtual_pool')) continue;
+
+                try {
+                    const accountKeys = tx.transaction.message.accountKeys || [];
+                    const staticKeys = tx.transaction.message.staticAccountKeys || [];
+                    const allKeys = (accountKeys.length > 0 ? accountKeys : staticKeys).map(k => (typeof k === 'string' ? k : (k.pubkey || k)).toString());
+                    if (tx.meta.loadedAddresses) {
+                        if (tx.meta.loadedAddresses.writable) allKeys.push(...tx.meta.loadedAddresses.writable.map(k => k.toString()));
+                        if (tx.meta.loadedAddresses.readonly) allKeys.push(...tx.meta.loadedAddresses.readonly.map(k => k.toString()));
+                    }
+
+                    for (const ix of (tx.transaction.message.instructions || [])) {
+                        const pid = allKeys[ix.programIdIndex];
+                        if (pid === DBC_PROGRAM) {
+                            const a = ix.accounts || [];
+                            if (a.length >= 6) {
+                                const poolAddr = allKeys[a[5]];
+                                const baseMint = allKeys[a[3]];
+                                if (poolAddr && !pools.find(p => p.address === poolAddr)) {
+                                    pools.push({ address: poolAddr, baseMint, config: configAddr });
+                                }
+                            }
+                        }
+                    }
+                } catch (_) { }
             }
+
+            if (i + 5 < sigs.length) await new Promise(r => setTimeout(r, 200));
         }
     } catch (e) {
         console.error(`[totalFee] Error finding pools for ${configAddr.slice(0, 8)}: ${(e.message || '').slice(0, 80)}`);
