@@ -219,12 +219,6 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                 const wsUrl = settings.HELIUS_WS_URL || rpcUrl.replace('https://', 'wss://').replace('http://', 'ws://');
                 console.log(`[${ts()}] [WS] Connecting to ${wsUrl.slice(0, 50)}...`);
                 wsConnection = new Connection(rpcUrl, { commitment: 'confirmed', wsEndpoint: wsUrl });
-
-                // Test: subscribe to DBC program to verify WS works
-                wsConnection.onLogs(new PublicKey(DBC_PROGRAM), (logs) => {
-                    console.log(`[${ts()}] [WS] 📡 DBC activity: ${logs.signature.slice(0, 16)}...`);
-                }, 'confirmed');
-                console.log(`[${ts()}] [WS] Test subscription to DBC program active`);
             }
             wsConnection.onLogs(new PublicKey(configAddr), async (logs) => {
                 try {
