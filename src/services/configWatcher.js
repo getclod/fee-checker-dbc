@@ -24,13 +24,21 @@ function createWatcherConnections() {
     return rpcs.map(url => new Connection(url, { commitment: 'confirmed' }));
 }
 
-async function tryRpc(connections, fn) {
+async function tryRpc(connections, fn, retries = 2) {
     let lastErr;
-    for (const conn of connections) {
-        try { return await fn(conn); } catch (e) {
-            lastErr = e;
-            if (e.message && (e.message.includes('403') || e.message.includes('not allowed') || e.message.includes('429'))) continue;
-            throw e;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        for (const conn of connections) {
+            try { return await fn(conn); } catch (e) {
+                lastErr = e;
+                const msg = e.message || '';
+                if (msg.includes('429') || msg.includes('Too many')) {
+                    // Rate limited — wait and try next RPC
+                    await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+                    continue;
+                }
+                if (msg.includes('403') || msg.includes('not allowed')) continue;
+                throw e;
+            }
         }
     }
     throw lastErr || new Error('All RPCs failed');
@@ -466,9 +474,9 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
         setInterval(pollBatch, POLL_MS);
         console.log(`[${ts()}] [POLL] Backup: ${BATCH} configs / ${POLL_MS / 1000}s`);
 
-        // Wallet discovery every 30s
-        setInterval(pollWallets, 30000);
-        console.log(`[${ts()}] [WATCHER] Wallet poll every 30s`);
+        // Wallet discovery every 10s
+        setInterval(pollWallets, 10000);
+        console.log(`[${ts()}] [WATCHER] Wallet poll every 10s`);
     });
 }
 
