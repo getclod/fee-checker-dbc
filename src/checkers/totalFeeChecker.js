@@ -227,6 +227,9 @@ async function getTotalFees(walletAddr, solUsd = 0) {
         configPoolMap[configAddr] = { configTotal: 0, configClaimed: 0, configAvailable: 0, poolDetails: [] };
         for (const p of pools) flatPools.push({ ...p, configAddr });
     }
+    poolCount = flatPools.length;
+
+    const failedPools = [];
 
     for (let i = 0; i < flatPools.length; i += 3) {
         const batch = flatPools.slice(i, i + 3);
@@ -235,9 +238,11 @@ async function getTotalFees(walletAddr, solUsd = 0) {
         );
 
         for (let j = 0; j < batch.length; j++) {
-            if (feeResults[j].status !== 'fulfilled') continue;
-            const fees = feeResults[j].value;
-            if (fees.error) continue;
+            const fees = feeResults[j].status === 'fulfilled' ? feeResults[j].value : null;
+            if (!fees || fees.error) {
+                failedPools.push(batch[j]);
+                continue;
+            }
             const cm = configPoolMap[batch[j].configAddr];
             cm.configTotal += fees.totalLifetime || 0;
             cm.configClaimed += fees.totalClaimed || 0;
@@ -250,10 +255,37 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                 available: fees.totalAvailable || 0,
                 quoteLabel: fees.quoteLabel || 'SOL',
             });
-            poolCount++;
         }
 
         if (i + 3 < flatPools.length) await new Promise(r => setTimeout(r, 300));
+    }
+
+    // Retry failed pools once
+    if (failedPools.length > 0) {
+        await new Promise(r => setTimeout(r, 2000));
+        for (let i = 0; i < failedPools.length; i += 2) {
+            const batch = failedPools.slice(i, i + 2);
+            const feeResults = await Promise.allSettled(
+                batch.map(p => getClaimableFees(p.address, solUsd))
+            );
+            for (let j = 0; j < batch.length; j++) {
+                const fees = feeResults[j].status === 'fulfilled' ? feeResults[j].value : null;
+                if (!fees || fees.error) continue;
+                const cm = configPoolMap[batch[j].configAddr];
+                cm.configTotal += fees.totalLifetime || 0;
+                cm.configClaimed += fees.totalClaimed || 0;
+                cm.configAvailable += fees.totalAvailable || 0;
+                cm.poolDetails.push({
+                    address: batch[j].address,
+                    baseMint: batch[j].baseMint,
+                    lifetime: fees.totalLifetime || 0,
+                    claimed: fees.totalClaimed || 0,
+                    available: fees.totalAvailable || 0,
+                    quoteLabel: fees.quoteLabel || 'SOL',
+                });
+            }
+            if (i + 2 < failedPools.length) await new Promise(r => setTimeout(r, 500));
+        }
     }
 
     // 4. Aggregate results
