@@ -100,38 +100,36 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                 const walletIndex = allKeys.indexOf(walletAddr);
                 if (walletIndex === -1) continue;
 
-                // Collect all DBC instruction accounts (for pool identification)
-                const dbcAccounts = [];
-                for (const ix of (tx.transaction.message.instructions || [])) {
-                    const pid = allKeys[ix.programIdIndex];
-                    if (pid === DBC_PROGRAM) {
-                        const a = ix.accounts || [];
-                        for (const ai of a) {
-                            const addr = allKeys[ai];
-                            if (addr && addr !== walletAddr && addr !== DBC_PROGRAM
-                                && !dbcAccounts.includes(addr)) {
-                                dbcAccounts.push(addr);
-                            }
-                        }
-                    }
-                }
-
                 // Calculate SOL gain
                 const pre = tx.meta.preBalances?.[walletIndex] || 0;
                 const post = tx.meta.postBalances?.[walletIndex] || 0;
                 const solGain = (post - pre) / 1e9;
+
+                // Find source account (balance decreased → fee vault, unique per pool)
+                let sourceAddr = null;
+                if (solGain > 0.0005 && tx.meta.preBalances && tx.meta.postBalances) {
+                    let maxDrop = 0;
+                    for (let ai = 0; ai < allKeys.length; ai++) {
+                        if (ai === walletIndex) continue;
+                        const aPre = tx.meta.preBalances[ai] || 0;
+                        const aPost = tx.meta.postBalances[ai] || 0;
+                        const drop = (aPre - aPost) / 1e9;
+                        if (drop > maxDrop && drop > 0.0005) {
+                            maxDrop = drop;
+                            sourceAddr = allKeys[ai];
+                        }
+                    }
+                }
 
                 if (solGain > 0.0005) {
                     if (!totals.SOL) totals.SOL = { earned: 0 };
                     totals.SOL.earned += solGain;
                     claimCount++;
 
-                    // Attribute to first DBC account as pool key
-                    for (const acc of dbcAccounts) {
-                        const key = `${acc}:SOL`;
-                        if (!poolEarnings[key]) poolEarnings[key] = { address: acc, earned: 0, quoteLabel: 'SOL' };
+                    if (sourceAddr) {
+                        const key = `${sourceAddr}:SOL`;
+                        if (!poolEarnings[key]) poolEarnings[key] = { address: sourceAddr, earned: 0, quoteLabel: 'SOL' };
                         poolEarnings[key].earned += solGain;
-                        break;
                     }
                 }
 
@@ -153,11 +151,22 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                             totals[label].earned += tokenGain;
                             claimCount++;
 
-                            for (const acc of dbcAccounts) {
-                                const key = `${acc}:${label}`;
-                                if (!poolEarnings[key]) poolEarnings[key] = { address: acc, earned: 0, quoteLabel: label };
+                            // Find source token account (sent tokens → balance decreased)
+                            let tokenSource = null;
+                            for (const preT of tx.meta.preTokenBalances) {
+                                if (preT.owner === walletAddr || preT.mint !== mint) continue;
+                                const postT = tx.meta.postTokenBalances.find(pt => pt.accountIndex === preT.accountIndex);
+                                const preTAmt = Number(preT.uiTokenAmount?.uiAmount || 0);
+                                const postTAmt = postT ? Number(postT.uiTokenAmount?.uiAmount || 0) : 0;
+                                if (preTAmt > postTAmt) {
+                                    tokenSource = preT.owner || allKeys[preT.accountIndex];
+                                    break;
+                                }
+                            }
+                            if (tokenSource) {
+                                const key = `${tokenSource}:${label}`;
+                                if (!poolEarnings[key]) poolEarnings[key] = { address: tokenSource, earned: 0, quoteLabel: label };
                                 poolEarnings[key].earned += tokenGain;
-                                break;
                             }
                         }
                     }
