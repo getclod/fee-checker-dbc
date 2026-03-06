@@ -245,15 +245,15 @@ function shortAddr(a) { return (!a || a.length < 14) ? (a || '?') : `${a.slice(0
 function formatDeployNotification(ownerName, info) {
     const L = [];
     L.push(`🚀 <b>New Token Deployed!</b>`);
+    L.push(`👤 Dev: <b>${ownerName}</b>`);
     L.push(``);
-    L.push(`👤 Owner: <b>${ownerName}</b>`);
-    if (info.tokenName || info.tokenSymbol) L.push(`🪙 ${info.tokenName || '?'} ($${info.tokenSymbol || '?'})`);
-    if (info.baseMint) L.push(`📦 Mint: <code>${info.baseMint}</code>`);
-    if (info.configUsed) L.push(`⚙️ Config: <a href="https://solscan.io/account/${info.configUsed}">${shortAddr(info.configUsed)}</a>`);
+    if (info.tokenName || info.tokenSymbol) L.push(`🪙 ${info.tokenName || '?'} - $${info.tokenSymbol || '?'}`);
+    if (info.baseMint) L.push(`<code>${info.baseMint}</code>`);
+    L.push(``);
     if (info.creator) L.push(`👑 Deployer: <a href="https://solscan.io/account/${info.creator}">${shortAddr(info.creator)}</a>`);
-    if (info.pool) L.push(`🏊 Pool: <a href="https://solscan.io/account/${info.pool}">${shortAddr(info.pool)}</a>`);
-    L.push(``);
-    L.push(`🔗 <a href="https://solscan.io/tx/${info.signature}">View Transaction</a>`);
+    if (info.configUsed) L.push(`⚙️ Config: <a href="https://solscan.io/account/${info.configUsed}">${shortAddr(info.configUsed)}</a>`);
+    if (info.creator) L.push(`🔑 Config Creator: <a href="https://solscan.io/account/${info.creator}">${shortAddr(info.creator)}</a>`);
+    if (info.signature) L.push(`🔗 <a href="https://solscan.io/tx/${info.signature}">View Transaction</a>`);
     return L.join('\n');
 }
 
