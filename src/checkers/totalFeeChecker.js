@@ -110,10 +110,30 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                 const walletIndex = allKeys.indexOf(walletAddr);
                 if (walletIndex === -1) continue;
 
-                // Calculate SOL gain
+                // Detect if this is a migration claim (DAMM v2)
+                const DAMM_V2 = 'cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG';
+                const isMigration = allKeys.includes(DAMM_V2) || logs.includes(DAMM_V2);
+
+                // Calculate native SOL gain
                 const pre = tx.meta.preBalances?.[walletIndex] || 0;
                 const post = tx.meta.postBalances?.[walletIndex] || 0;
-                const solGain = (post - pre) / 1e9;
+                let solGain = (post - pre) / 1e9;
+
+                // Also check WSOL token gain (migration claims give WSOL)
+                const WSOL = 'So11111111111111111111111111111111111111112';
+                if (tx.meta.preTokenBalances && tx.meta.postTokenBalances) {
+                    for (const postBal of tx.meta.postTokenBalances) {
+                        if (postBal.owner !== walletAddr || postBal.mint !== WSOL) continue;
+                        const postAmt = Number(postBal.uiTokenAmount?.uiAmount || 0);
+                        const preBal = tx.meta.preTokenBalances.find(p => p.owner === walletAddr && p.mint === WSOL);
+                        const preAmt = preBal ? Number(preBal.uiTokenAmount?.uiAmount || 0) : 0;
+                        const wsolGain = postAmt - preAmt;
+                        // Only count WSOL gain if native SOL didn't already capture it (no closeAccount)
+                        if (wsolGain > 0.0005 && solGain < 0.0005) {
+                            solGain = wsolGain;
+                        }
+                    }
+                }
 
                 // Find source account (balance decreased → fee vault, unique per pool)
                 let sourceAddr = null;
@@ -132,7 +152,6 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                 }
 
                 // Find base token mint (not SOL/WSOL/USD1/USDC)
-                const WSOL = 'So11111111111111111111111111111111111111112';
                 const skipMints = [USD1_MINT, USDC_MINT, WSOL];
                 let baseMint = null;
                 const allTokenBals = [...(tx.meta.preTokenBalances || []), ...(tx.meta.postTokenBalances || [])];
@@ -149,8 +168,9 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                     claimCount++;
 
                     if (sourceAddr) {
-                        const key = `${sourceAddr}:SOL`;
-                        if (!poolEarnings[key]) poolEarnings[key] = { address: sourceAddr, earned: 0, quoteLabel: 'SOL', baseMint: null };
+                        const mLabel = isMigration ? 'migration' : 'fee';
+                        const key = `${sourceAddr}:SOL:${mLabel}`;
+                        if (!poolEarnings[key]) poolEarnings[key] = { address: sourceAddr, earned: 0, quoteLabel: 'SOL', baseMint: null, isMigration };
                         poolEarnings[key].earned += solGain;
                         if (baseMint) poolEarnings[key].baseMint = baseMint;
                     }

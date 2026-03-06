@@ -298,7 +298,8 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
                 const price = p.quoteLabel === 'SOL' ? solUsd : 1;
                 const meta = p.baseMint ? metaMap[p.baseMint] : null;
                 const label = (meta && meta.symbol) ? `$${meta.symbol}` : shortAddr(p.address);
-                L.push(`${i + 1}. ${label} → ${fmtNum(p.earned)} ${p.quoteLabel} ${fmtUsd(p.earned, price)}`);
+                const tag = p.isMigration ? ' 🔄' : '';
+                L.push(`${i + 1}. ${label}${tag} → ${fmtNum(p.earned)} ${p.quoteLabel} ${fmtUsd(p.earned, price)}`);
             }
         }
 
