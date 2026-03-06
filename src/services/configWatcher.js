@@ -318,31 +318,119 @@ function formatNewConfigNotification(ownerName, configAddr) {
     ].join('\n');
 }
 
-// ──── Main watcher loop ──────────────────────────────────────────────────────
+// ──── Main watcher ──────────────────────────────────────────────────────────
 
 function startConfigWatcher(onNewDeployment, onNewConfig) {
     const connections = createWatcherConnections();
     const seenSigs = loadSeenSigs();
-    const discovered = loadDiscoveredConfigs(); // { walletAddr: [configAddr, ...] }
+    const discovered = loadDiscoveredConfigs();
 
     console.log(`[${ts()}] [WATCHER] Config watcher starting...`);
 
+    // Track active WebSocket subscriptions
+    const activeSubscriptions = new Set();
+    let wsConnection = null;
+
+    // Create WebSocket connection for real-time monitoring
+    function createWsConnection() {
+        const settings = loadSettings();
+        const rpcUrl = settings.RPC_URL || '';
+        // Convert https:// to wss:// for WebSocket
+        const wsUrl = rpcUrl.replace('https://', 'wss://').replace('http://', 'ws://');
+        return new Connection(wsUrl, {
+            commitment: 'confirmed',
+            wsEndpoint: wsUrl,
+        });
+    }
+
+    // Subscribe to a config address for real-time deploy detection
+    function subscribeToConfig(configAddr, ownerName) {
+        if (activeSubscriptions.has(configAddr)) return;
+
+        try {
+            if (!wsConnection) wsConnection = createWsConnection();
+
+            const configPk = new PublicKey(configAddr);
+            const subId = wsConnection.onLogs(configPk, async (logs, ctx) => {
+                try {
+                    const logsStr = (logs.logs || []).join(' ').toLowerCase();
+                    const hasPoolInit = logsStr.includes('initialize_virtual_pool')
+                        || logsStr.includes('evtinitializepool');
+
+                    if (!hasPoolInit) return;
+
+                    const sig = logs.signature;
+                    const seenKey = `config:${configAddr}`;
+                    if (!seenSigs[seenKey]) seenSigs[seenKey] = [];
+                    if (seenSigs[seenKey].includes(sig)) return;
+                    seenSigs[seenKey].push(sig);
+
+                    console.log(`[${ts()}] [WS] ⚡ Deploy detected on ${configAddr.slice(0, 8)}! Sig: ${sig.slice(0, 16)}...`);
+
+                    // Fetch full transaction for details
+                    try {
+                        const tx = await tryRpc(connections, (conn) =>
+                            conn.getTransaction(sig, { maxSupportedTransactionVersion: 0 })
+                        );
+
+                        const info = parsePoolCreation(tx);
+                        if (info) {
+                            console.log(`[${ts()}] [WS] 🚀 ${ownerName} | ${info.tokenSymbol || '?'} | Mint: ${info.baseMint}`);
+                            const html = formatDeployNotification(ownerName, info);
+                            onNewDeployment(ownerName, { signature: sig, ...info }, html);
+                        }
+                    } catch (e) {
+                        console.error(`[${ts()}] [WS] Error fetching tx: ${e.message}`);
+                    }
+
+                    saveSeenSigs(seenSigs);
+                } catch (e) {
+                    console.error(`[${ts()}] [WS] Error processing log: ${e.message}`);
+                }
+            }, 'confirmed');
+
+            activeSubscriptions.add(configAddr);
+        } catch (e) {
+            console.error(`[${ts()}] [WS] Failed to subscribe ${configAddr.slice(0, 8)}: ${e.message}`);
+        }
+    }
+
+    // Subscribe to all discovered configs
+    function subscribeAll() {
+        for (const [walletAddr, configs] of Object.entries(discovered)) {
+            const wallets = loadWatchedWallets();
+            const wallet = wallets.find(w => w.address === walletAddr);
+            const name = wallet ? wallet.name : 'Unknown';
+
+            for (const cfgAddr of configs) {
+                subscribeToConfig(cfgAddr, name);
+            }
+        }
+        console.log(`[${ts()}] [WS] Subscribed to ${activeSubscriptions.size} configs for real-time detection`);
+    }
+
+    // Polling: only for wallet config discovery (slower)
+    const WALLET_POLL = 30_000; // 30s for wallet scan
     let isFirstRun = true;
 
-    async function poll() {
+    async function pollWallets() {
         const wallets = loadWatchedWallets();
         if (wallets.length === 0) return;
 
         for (const wallet of wallets) {
             try {
-                // Step 1: Discover new configs from this wallet
                 const newConfigs = await discoverConfigs(connections, wallet.address, seenSigs, isFirstRun);
                 if (!discovered[wallet.address]) discovered[wallet.address] = [];
 
+                let addedNew = false;
                 for (const cfgAddr of newConfigs) {
                     if (!discovered[wallet.address].includes(cfgAddr)) {
                         discovered[wallet.address].push(cfgAddr);
                         console.log(`[${ts()}] [WATCHER] ✅ Added config ${cfgAddr} for ${wallet.name}`);
+                        addedNew = true;
+
+                        // Immediately subscribe the new config to WebSocket
+                        subscribeToConfig(cfgAddr, wallet.name);
 
                         if (!isFirstRun && onNewConfig) {
                             const html = formatNewConfigNotification(wallet.name, cfgAddr);
@@ -351,18 +439,11 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
                     }
                 }
 
-                // Step 2: Check all discovered configs for new deploys
-                const configsToWatch = discovered[wallet.address] || [];
-
-                for (const cfgAddr of configsToWatch) {
-                    const newDeploys = await checkConfigForDeploys(connections, cfgAddr, seenSigs);
-
-                    if (!isFirstRun && newDeploys.length > 0) {
-                        for (const info of newDeploys) {
-                            console.log(`[${ts()}] [WATCHER] 🚀 ${wallet.name} | ${info.tokenSymbol || '?'} | Mint: ${info.baseMint}`);
-                            const html = formatDeployNotification(wallet.name, info);
-                            onNewDeployment(wallet.name, info, html);
-                        }
+                // On first run, also do initial config polling to mark sigs as seen
+                if (isFirstRun) {
+                    const configsToWatch = discovered[wallet.address] || [];
+                    for (const cfgAddr of configsToWatch) {
+                        await checkConfigForDeploys(connections, cfgAddr, seenSigs);
                     }
                 }
             } catch (e) {
@@ -380,10 +461,18 @@ function startConfigWatcher(onNewDeployment, onNewConfig) {
         saveDiscoveredConfigs(discovered);
     }
 
-    poll().then(() => {
-        console.log(`[${ts()}] [WATCHER] Initial scan complete. Polling every ${POLL_INTERVAL / 1000}s`);
-        setInterval(poll, POLL_INTERVAL);
+    // Start: initial scan → subscribe → poll
+    pollWallets().then(() => {
+        console.log(`[${ts()}] [WATCHER] Initial scan complete.`);
+
+        // Subscribe all discovered configs to WebSocket
+        subscribeAll();
+
+        // Poll wallets for new configs every 30s
+        console.log(`[${ts()}] [WATCHER] Wallet poll every ${WALLET_POLL / 1000}s | Deploys via WebSocket ⚡`);
+        setInterval(pollWallets, WALLET_POLL);
     });
 }
 
 module.exports = { startConfigWatcher, loadWatchedWallets };
+
