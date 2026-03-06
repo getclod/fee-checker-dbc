@@ -87,13 +87,16 @@ async function getTotalFees(walletAddr, solUsd = 0) {
                     if (tx.meta.loadedAddresses.readonly) allKeys.push(...tx.meta.loadedAddresses.readonly.map(k => k.toString()));
                 }
 
-                const hasDBC = allKeys.includes(DBC_PROGRAM);
+                // Check logs for DBC program (catches CPI calls too)
+                const logs = (tx.meta.logMessages || []).join(' ');
+                const logsLower = logs.toLowerCase();
+                const hasDBC = allKeys.includes(DBC_PROGRAM) || logs.includes(DBC_PROGRAM);
                 if (!hasDBC) continue;
 
-                // Check logs for claim/migration (skip create_config and initialize)
-                const logs = (tx.meta.logMessages || []).join(' ').toLowerCase();
-                const isSetup = logs.includes('createconfig') || logs.includes('create_config')
-                    || logs.includes('initializevirtualpool') || logs.includes('initialize_virtual_pool');
+                // Skip pure setup txs (but allow claim/migration that happen alongside)
+                const isSetup = (logsLower.includes('createconfig') || logsLower.includes('create_config')
+                    || logsLower.includes('initializevirtualpool') || logsLower.includes('initialize_virtual_pool'))
+                    && !logsLower.includes('claim') && !logsLower.includes('migrate');
                 if (isSetup) continue;
 
                 // Find wallet index
