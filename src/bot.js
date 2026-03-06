@@ -220,26 +220,70 @@ bot.onText(/\/fee(.*)/, async (msg, match) => {
 
 bot.onText(/\/totalfee(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const wallet = getCreatorFromReply(msg, match);
+    const input = (match[1] || '').trim();
 
-    if (!wallet) {
+    // Parse multiple wallets (space-separated)
+    const wallets = input.split(/[\s,]+/).filter(w => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(w));
+
+    if (wallets.length === 0) {
+        // Try from reply
+        const w = getCreatorFromReply(msg, match);
+        if (w) wallets.push(w);
+    }
+
+    if (wallets.length === 0) {
         log('WARN', '/totalfee', chatId, 'No wallet address');
         return sendHtml(bot, chatId, formatError(
             'Missing Address',
-            'Usage: /totalfee <config_creator_wallet>\nShows total fees earned across all configs & pools.',
+            'Usage: /totalfee <wallet1> [wallet2] ...\nShows total fees earned across all wallets.',
         ));
     }
 
-    await sendHtml(bot, chatId, '⏳ Scanning wallet transactions... This may take a minute.');
+    await sendHtml(bot, chatId, `⏳ Scanning ${wallets.length} wallet(s)... This may take a minute.`);
     await bot.sendChatAction(chatId, 'typing');
 
-    log('INFO', '/totalfee', chatId, `Scanning wallet: ${wallet}`);
+    log('INFO', '/totalfee', chatId, `Scanning ${wallets.length} wallet(s): ${wallets.map(w => w.slice(0, 8)).join(', ')}`);
 
     try {
         let solUsd = 0;
         try { solUsd = await getSolUsdPrice(); } catch (_) { }
 
-        const result = await getTotalFees(wallet, solUsd);
+        // Scan each wallet
+        const allResults = [];
+        for (const w of wallets) {
+            const r = await getTotalFees(w, solUsd);
+            allResults.push(r);
+        }
+
+        // Merge results
+        const mergedTotals = {};
+        const mergedPools = {};
+        let totalTxCount = 0;
+        let totalClaimCount = 0;
+
+        for (const r of allResults) {
+            totalTxCount += r.txCount;
+            totalClaimCount += r.claimCount;
+
+            for (const [lbl, t] of Object.entries(r.totals)) {
+                if (!mergedTotals[lbl]) mergedTotals[lbl] = { earned: 0 };
+                mergedTotals[lbl].earned += t.earned;
+            }
+
+            for (const p of r.topPools) {
+                const key = `${p.address}:${p.quoteLabel}:${p.isMigration ? 'm' : 'f'}`;
+                if (!mergedPools[key]) mergedPools[key] = { ...p };
+                else mergedPools[key].earned += p.earned;
+            }
+        }
+
+        const topPools = Object.values(mergedPools)
+            .sort((a, b) => {
+                const aUsd = a.earned * (a.quoteLabel === 'SOL' ? solUsd : 1);
+                const bUsd = b.earned * (b.quoteLabel === 'SOL' ? solUsd : 1);
+                return bUsd - aUsd;
+            })
+            .slice(0, 10);
 
         const shortAddr = (a) => (!a || a.length < 14) ? (a || '?') : `${a.slice(0, 6)}...${a.slice(-4)}`;
         const fmtNum = (n) => Number(n || 0).toFixed(6);
@@ -250,21 +294,27 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
 
         const L = [];
         L.push(`💰 <b>Total Fee Report</b>`);
-        L.push(`👤 Wallet: <a href="https://solscan.io/account/${wallet}">${shortAddr(wallet)}</a>`);
-        L.push(`📊 ${result.txCount} DBC txs | ${result.claimCount} claims`);
+        if (wallets.length === 1) {
+            L.push(`👤 Wallet: <a href="https://solscan.io/account/${wallets[0]}">${shortAddr(wallets[0])}</a>`);
+        } else {
+            for (const w of wallets) {
+                L.push(`👤 <a href="https://solscan.io/account/${w}">${shortAddr(w)}</a>`);
+            }
+        }
+        L.push(`📊 ${totalTxCount} txs | ${totalClaimCount} claims`);
         L.push(``);
 
         // Per-currency earned totals
         let totalUsdValue = 0;
         const currencyOrder = ['SOL', 'USD1', 'USDC'];
-        const currencies = Object.keys(result.totals).sort((a, b) => {
+        const currencies = Object.keys(mergedTotals).sort((a, b) => {
             const ai = currencyOrder.indexOf(a);
             const bi = currencyOrder.indexOf(b);
             return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
         });
 
         for (const lbl of currencies) {
-            const t = result.totals[lbl];
+            const t = mergedTotals[lbl];
             const price = lbl === 'SOL' ? solUsd : 1;
             totalUsdValue += t.earned * price;
             L.push(`<b>── ${lbl} ──</b>`);
@@ -275,9 +325,8 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
         L.push(`💵 <b>Total: $${totalUsdValue.toFixed(2)}</b>`);
 
         // Top 10 pools with token names
-        if (result.topPools.length > 0) {
-            // Fetch token names for pools that have baseMint
-            const mintsToFetch = result.topPools.map(p => p.baseMint).filter(Boolean);
+        if (topPools.length > 0) {
+            const mintsToFetch = topPools.map(p => p.baseMint).filter(Boolean);
             const uniqueMints = [...new Set(mintsToFetch)];
             const metaMap = {};
             if (uniqueMints.length > 0) {
@@ -292,9 +341,9 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
             }
 
             L.push(``);
-            L.push(`🏆 <b>Top ${result.topPools.length} Pools:</b>`);
-            for (let i = 0; i < result.topPools.length; i++) {
-                const p = result.topPools[i];
+            L.push(`🏆 <b>Top ${topPools.length} Pools:</b>`);
+            for (let i = 0; i < topPools.length; i++) {
+                const p = topPools[i];
                 const price = p.quoteLabel === 'SOL' ? solUsd : 1;
                 const meta = p.baseMint ? metaMap[p.baseMint] : null;
                 const label = (meta && meta.symbol) ? `$${meta.symbol}` : shortAddr(p.address);
@@ -303,8 +352,8 @@ bot.onText(/\/totalfee(.*)/, async (msg, match) => {
             }
         }
 
-        const logTotal = currencies.map(l => `${result.totals[l].earned.toFixed(2)} ${l}`).join(' + ');
-        log('INFO', '/totalfee', chatId, `Done: ${result.claimCount} claims, ${logTotal}`);
+        const logTotal = currencies.map(l => `${mergedTotals[l].earned.toFixed(2)} ${l}`).join(' + ');
+        log('INFO', '/totalfee', chatId, `Done: ${totalClaimCount} claims, ${logTotal}`);
 
         return sendHtml(bot, chatId, L.join('\n'));
     } catch (e) {
